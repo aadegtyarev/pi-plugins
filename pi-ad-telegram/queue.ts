@@ -1,5 +1,13 @@
 export const MAX_QUEUED_TASKS = 20;
 
+export type QueueTaskFinalState = "picked up" | "cancelled";
+export type QueueTaskReaction = "👍" | "👎";
+
+/** Telegram Bot API accepts these emoji as standard reactions (unlike the visual ✅/❌ status icons). */
+export function reactionForQueueTask(state: QueueTaskFinalState): QueueTaskReaction {
+  return state === "picked up" ? "👍" : "👎";
+}
+
 export interface QueuedTelegramTask {
   id: string;
   chatId: number;

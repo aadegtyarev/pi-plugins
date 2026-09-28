@@ -3,7 +3,7 @@ import test from "node:test";
 import { AgentBoardPublisher, type AgentBoardTransport, BackgroundAgentBatch } from "./agent-board.ts";
 import { getTelegramCommandMenu, normalizeTelegramCommand, TELEGRAM_COMMAND_DEFINITIONS, telegramHelpText } from "./commands.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
-import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, TelegramTaskQueue } from "./queue.ts";
+import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue } from "./queue.ts";
 import { renderTelegramMessage, sendTelegramMessage, type TelegramRequester } from "./message-renderer.ts";
 import telegramExtension from "./index.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -75,15 +75,20 @@ test("failed notice deletion leaves an inert final status after a successful rea
   assert.deepEqual(calls, ["react", "delete", "edit"]);
 });
 
-test("rejected reaction falls back to editing the notice", async () => {
+test("REACTION_INVALID falls back to editing the notice", async () => {
   const calls: string[] = [];
   await finalizeQueueNotice({
     signal: new AbortController().signal,
-    react: async () => { calls.push("react"); throw new Error("reactions unavailable"); },
+    react: async () => { calls.push("react"); throw Object.assign(new Error("Bad Request: REACTION_INVALID"), { status: 400 }); },
     deleteNotice: async () => { calls.push("delete"); return true; },
     editNotice: async () => { calls.push("edit"); },
   });
   assert.deepEqual(calls, ["react", "edit"]);
+});
+
+test("queue task reactions use Telegram-supported emojis", () => {
+  assert.equal(reactionForQueueTask("picked up"), "👍");
+  assert.equal(reactionForQueueTask("cancelled"), "👎");
 });
 
 test("successful reaction and notice deletion do not edit a completed notice", async () => {

@@ -7,7 +7,7 @@ import type { BackgroundWorkEvent } from "./background-adapters/types.ts";
 import { AgentBoardPublisher, BackgroundAgentBatch } from "./agent-board.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
 import { getTelegramCommandMenu, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
-import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, TelegramTaskQueue, type QueuedTelegramTask } from "./queue.ts";
+import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue, type QueueTaskFinalState, type QueuedTelegramTask } from "./queue.ts";
 import { editTelegramMessage, escapeHtml, MAX_TELEGRAM_MESSAGE_LENGTH as MAX_MESSAGE_LENGTH, sendTelegramMessage } from "./message-renderer.ts";
 
 const TELEGRAM_API = "https://api.telegram.org";
@@ -476,7 +476,7 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  async function closeQueuedTask(task: QueuedTelegramTask, state: "picked up" | "cancelled", emoji: "✅" | "❌", signal: AbortSignal): Promise<void> {
+  async function closeQueuedTask(task: QueuedTelegramTask, state: QueueTaskFinalState, emoji: "✅" | "❌", signal: AbortSignal): Promise<void> {
     if (!botToken) return;
     await finalizeQueueNotice({
       signal,
@@ -484,7 +484,7 @@ export default function (pi: ExtensionAPI) {
         react: () => telegramRequest<unknown>(botToken!, "setMessageReaction", {
           chat_id: task.chatId,
           message_id: task.replyToMessageId,
-          reaction: [{ type: "emoji", emoji }],
+          reaction: [{ type: "emoji", emoji: reactionForQueueTask(state) }],
           is_big: false,
         }, signal),
       } : {}),
@@ -497,7 +497,12 @@ export default function (pi: ExtensionAPI) {
         }, signal);
       },
       onError: (stage, error) => {
-        if (!signal.aborted) console.error(`[pi-ad-telegram] Failed to finalize queue task (${stage}):`, error);
+        if (signal.aborted) return;
+        if (stage === "reaction" && error instanceof Error && error.message.includes("REACTION_INVALID")) {
+          console.warn("[pi-ad-telegram] Telegram rejected the queue reaction; falling back to editing the queue notice.");
+          return;
+        }
+        console.error(`[pi-ad-telegram] Failed to finalize queue task (${stage}):`, error);
       },
     });
   }
