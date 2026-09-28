@@ -7,22 +7,22 @@ export interface TelegramCommandDefinition {
 }
 
 export const TELEGRAM_COMMAND_DEFINITIONS: TelegramCommandDefinition[] = [
-  { name: "start", aliases: ["help"], description: "Подключиться и показать справку", menu: [
-    { command: "start", description: "Подключиться и показать справку" },
-    { command: "help", description: "Показать справку" },
-  ], help: "/start, /help — подключиться и показать справку" },
-  { name: "status", description: "Состояние Pi и статистика сессии", menu: [{ command: "status", description: "Состояние Pi и статистика сессии" }], help: "/status — состояние Pi, модель, effort, контекст и статистика сессии" },
-  { name: "agents", description: "Фоновые сабагенты и задачи", menu: [{ command: "agents", description: "Фоновые сабагенты и задачи" }], help: "/agents — обновить доску фоновых сабагентов" },
-  { name: "queue", description: "Показать очередь задач и их ID", menu: [{ command: "queue", description: "Показать очередь задач и их ID" }], help: "/queue — показать ожидающие задачи и их ID" },
-  { name: "queue_cancel", aliases: ["queue-cancel"], description: "Удалить задачу из очереди по ID", menu: [{ command: "queue_cancel", description: "Удалить задачу из очереди по ID" }], help: "/queue_cancel <ID> — удалить ожидающую задачу" },
-  { name: "clear_queue", aliases: ["clear-queue"], description: "Очистить ожидающие задачи", menu: [{ command: "clear_queue", description: "Очистить ожидающие задачи" }], help: "/clear_queue — удалить все ожидающие задачи" },
-  { name: "model", description: "Список или выбор модели", menu: [{ command: "model", description: "Список или выбор модели" }], help: "/model — список моделей; /model provider/model-id — выбрать модель" },
-  { name: "effort", description: "Уровень thinking effort", menu: [{ command: "effort", description: "Уровень thinking effort" }], help: "/effort — список уровней; /effort <level> — выбрать effort" },
-  { name: "compact", description: "Сжать контекст", menu: [{ command: "compact", description: "Сжать контекст" }], help: "/compact [инструкции] — сжать контекст" },
-  { name: "new", description: "Начать новую сессию", menu: [{ command: "new", description: "Начать новую сессию" }], help: "/new — начать новую сессию" },
-  { name: "bash", description: "Выполнить Bash-команду", menu: [{ command: "bash", description: "Выполнить Bash-команду" }], help: "/bash <command> — выполнить Bash в папке Pi; длинный вывод разбивается на сообщения\nПример: /bash git status\nВвод через stdin: /bash printf 'y\\n' | команда\nИнтерактивный TTY и ввод паролей не поддерживаются; не отправляйте секреты в Telegram" },
-  { name: "reload", description: "Перезагрузить расширения и ресурсы", menu: [{ command: "reload", description: "Перезагрузить расширения и ресурсы" }], help: "/reload — перечитать расширения и ресурсы без перезапуска Pi" },
-  { name: "cancel", description: "Остановить текущую задачу", menu: [{ command: "cancel", description: "Остановить текущую задачу" }], help: "/cancel — остановить текущую задачу или Bash-команду" },
+  { name: "start", aliases: ["help"], description: "Connect and show help", menu: [
+    { command: "start", description: "Connect and show help" },
+    { command: "help", description: "Show help" },
+  ], help: "/start, /help — connect and show help" },
+  { name: "status", description: "Pi status and session statistics", menu: [{ command: "status", description: "Pi status and session statistics" }], help: "/status — show Pi status, model, effort, context, and session statistics" },
+  { name: "agents", description: "Background agents and tasks", menu: [{ command: "agents", description: "Background agents and tasks" }], help: "/agents — refresh the background-agent board" },
+  { name: "queue", description: "Show queued tasks and their IDs", menu: [{ command: "queue", description: "Show queued tasks and their IDs" }], help: "/queue — show pending tasks and their IDs" },
+  { name: "queue_cancel", aliases: ["queue-cancel"], description: "Remove a queued task by ID", menu: [{ command: "queue_cancel", description: "Remove a queued task by ID" }], help: "/queue_cancel <ID> — remove a pending task" },
+  { name: "clear_queue", aliases: ["clear-queue"], description: "Clear pending tasks", menu: [{ command: "clear_queue", description: "Clear pending tasks" }], help: "/clear_queue — remove all pending tasks" },
+  { name: "model", description: "List or select a model", menu: [{ command: "model", description: "List or select a model" }], help: "/model — list models; /model provider/model-id — select a model" },
+  { name: "effort", description: "Thinking effort level", menu: [{ command: "effort", description: "Thinking effort level" }], help: "/effort — list levels; /effort <level> — select an effort level" },
+  { name: "compact", description: "Compact context", menu: [{ command: "compact", description: "Compact context" }], help: "/compact [instructions] — compact context" },
+  { name: "new", description: "Start a new session", menu: [{ command: "new", description: "Start a new session" }], help: "/new — start a new session" },
+  { name: "bash", description: "Run a Bash command", menu: [{ command: "bash", description: "Run a Bash command" }], help: "/bash <command> — run Bash in Pi's working directory; long output is split across messages\nExample: /bash git status\nPass stdin inline: /bash printf 'y\\n' | command\nInteractive TTY and password prompts are unsupported; never send secrets through Telegram" },
+  { name: "reload", description: "Reload extensions and resources", menu: [{ command: "reload", description: "Reload extensions and resources" }], help: "/reload — reload extensions and resources without restarting Pi" },
+  { name: "cancel", description: "Stop the current task", menu: [{ command: "cancel", description: "Stop the current task" }], help: "/cancel — stop the current task or Bash command" },
 ];
 
 const COMMAND_NAMES = new Map<string, string>();
@@ -41,7 +41,7 @@ export function getTelegramCommandMenu(): Array<{ command: string; description: 
 
 export function telegramHelpText(): string {
   return [
-    "Я подключён к запущенной сессии Pi. Отправьте текст — передам его агенту. Сообщения во время занятого Pi попадают в FIFO-очередь (до 20 задач) и запускаются по одной после завершения каждой операции. Фоновые сабагенты сами по себе не блокируют новый ввод после ответа родительской задачи.",
+    "I'm connected to a running Pi session. Send text to pass a task to the agent. Messages received while Pi is busy are added to a FIFO queue (up to 20 tasks) and run one at a time after each operation finishes. Background agents do not block new input after the parent turn completes.",
     ...TELEGRAM_COMMAND_DEFINITIONS.map((definition) => definition.help),
   ].join("\n\n");
 }

@@ -54,9 +54,9 @@ export class TelegramTaskQueue {
 }
 
 export function formatQueueListing(tasks: QueuedTelegramTask[]): string {
-  if (tasks.length === 0) return "Ваша очередь задач пуста.";
+  if (tasks.length === 0) return "Your task queue is empty.";
   const rows = tasks.map((task) => `• ID \`${task.id}\`: ${task.text.replace(/\s+/g, " ").slice(0, 180)}`);
-  return `В вашей очереди ${tasks.length} задач:\n${rows.join("\n")}\n\nУдалить: /queue_cancel <ID>`;
+  return `You have ${tasks.length} queued task(s):\n${rows.join("\n")}\n\nRemove a task: /queue_cancel <ID>`;
 }
 
 export function parseQueueCancelId(args: string): string | undefined {

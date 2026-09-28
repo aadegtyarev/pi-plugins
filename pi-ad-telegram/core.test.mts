@@ -111,7 +111,7 @@ test("queue preserves FIFO and scopes cancellation and clearing by chat", () => 
 
 test("queue listing uses real line breaks and cancel accepts trailing arguments", () => {
   const text = formatQueueListing([{ id: "q1", chatId: 1, text: "first\n  second" }]);
-  assert.equal(text, "В вашей очереди 1 задач:\n• ID `q1`: first second\n\nУдалить: /queue_cancel <ID>");
+  assert.equal(text, "You have 1 queued task(s):\n• ID `q1`: first second\n\nRemove a task: /queue_cancel <ID>");
   assert.equal(parseQueueCancelId("q1 extra args"), "q1");
   assert.equal(parseQueueCancelId("  \n"), undefined);
 });
@@ -229,15 +229,15 @@ test("Telegram polling dispatches migrated session commands with the current Ext
     while (sent.length < commands.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
 
     assert.equal(sent.length, commands.length, `Expected one response for each command; got: ${sent.join(" | ")}`);
-    assert.match(sent[0], /Модель: test-provider\/test-model/);
-    assert.match(sent[1], /Нет доступных моделей/);
-    assert.match(sent[2], /Текущий effort: medium/);
-    assert.match(sent[3], /Сжать контекст можно после завершения/);
-    assert.match(sent[4], /Начать новую сессию можно после завершения/);
-    assert.match(sent[5], /Перед перезагрузкой дождитесь завершения/);
-    assert.match(sent[6], /Pi занят\. Выполнить Bash/);
-    assert.match(sent[7], /Останавливаю текущую задачу/);
-    assert.ok(sent.every((text) => !text.includes("Неизвестная команда")));
+    assert.match(sent[0], /Model: test-provider\/test-model/);
+    assert.match(sent[1], /No models are available/);
+    assert.match(sent[2], /Current effort: medium/);
+    assert.match(sent[3], /Context can be compacted after/);
+    assert.match(sent[4], /A new session can be started after/);
+    assert.match(sent[5], /Wait for the current task to finish before reloading/);
+    assert.match(sent[6], /Pi is busy\. Bash can run/);
+    assert.match(sent[7], /Stopping the current task/);
+    assert.ok(sent.every((text) => !text.includes("Unknown command")));
   } finally {
     await events.get("session_shutdown")?.();
     globalThis.fetch = previousFetch;

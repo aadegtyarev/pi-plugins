@@ -1,10 +1,9 @@
 # Pi plugins
 
-Коллекция расширений для Pi. Каждое расширение лежит в отдельной подпапке.
+A collection of extensions for Pi. Each extension lives in its own subdirectory.
 
 - `pi-ad-telegram/` — Telegram bridge extension.
 - `web/` — public web search and page-fetch tools.
-- `pi-subagents` установлен как пользовательский пакет Pi (`pi install npm:pi-subagents`). Его документация и обновления доступны через `pi-subagents`.
+- `pi-subagents` is installed as a user-level Pi package (`pi install npm:pi-subagents`). Its documentation and updates are available through `pi-subagents`.
 
-Для разработки `pi-ad-telegram` установи зависимости командой `npm install`; проверки: `npm run typecheck` и `npm test`. Проектные инструкции для Pi-агентов, включая acceptance-контракт для subagent-задач, записаны в [`AGENTS.md`](AGENTS.md).
-
+To develop `pi-ad-telegram`, install dependencies with `npm install`; run checks with `npm run typecheck` and `npm test`. Project instructions for Pi agents, including the subagent acceptance contract, are in [`AGENTS.md`](AGENTS.md).

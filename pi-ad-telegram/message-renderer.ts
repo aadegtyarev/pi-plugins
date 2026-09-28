@@ -81,7 +81,7 @@ export function markdownToTelegramHtml(markdown: string): string {
 }
 
 function splitPlainText(text: string): string[] {
-  let rest = text || "(пустой ответ)";
+  let rest = text || "(empty response)";
   const parts: string[] = [];
   while (rest.length > 0) {
     let end = Math.min(rest.length, MAX_TELEGRAM_MESSAGE_LENGTH);
@@ -146,7 +146,7 @@ function htmlToPlainText(text: string): string {
 
 export function renderTelegramMessageParts(text: string, format: TelegramTextFormat = "plain"): RenderedTelegramPart[] {
   if (format === "html") {
-    return splitHtml(text || "(пустой ответ)").map((part) => ({ text: part, plainText: htmlToPlainText(part) }));
+    return splitHtml(text || "(empty response)").map((part) => ({ text: part, plainText: htmlToPlainText(part) }));
   }
   return splitPlainText(text).map((part) => ({
     text: format === "markdown" ? markdownToTelegramHtml(part) : part,
