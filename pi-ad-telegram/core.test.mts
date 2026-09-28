@@ -158,6 +158,9 @@ test("Telegram polling covers busy and successful session-command paths with the
   const previousAllowedIds = process.env.PI_TELEGRAM_ALLOWED_USER_IDS;
   const previousEnabled = process.env.PI_TELEGRAM_ENABLED;
   const previousFetch = globalThis.fetch;
+  const previousWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args) => { warnings.push(args.map(String).join(" ")); };
   process.env.PI_TELEGRAM_BOT_TOKEN = "test-token";
   process.env.PI_TELEGRAM_ALLOWED_USER_IDS = "7";
   process.env.PI_TELEGRAM_ENABLED = "1";
@@ -184,9 +187,11 @@ test("Telegram polling covers busy and successful session-command paths with the
   let nextUpdate = 0;
   let sessionIdle = false;
   let nextMessageId = 0;
+  const getUpdatesOffsets: number[] = [];
   let startupCount = 0;
   let replacementUpdateDelivered = false;
   let compactCompleted = false;
+  let timeoutInjected = false;
   let currentEffort = "medium";
   let selectedModel = "";
   let compactInstructions = "";
@@ -199,9 +204,14 @@ test("Telegram polling covers busy and successful session-command paths with the
     const url = new URL(String(input));
     const method = url.pathname.split("/").at(-1);
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    if (method === "getUpdates") getUpdatesOffsets.push(Number(body.offset));
     let result: unknown;
     if (method === "getUpdates" && body.offset === -1) {
       result = [];
+    } else if (method === "getUpdates" && !timeoutInjected) {
+      timeoutInjected = true;
+      const cause = Object.assign(new Error("Headers Timeout Error"), { code: "UND_ERR_HEADERS_TIMEOUT" });
+      throw new TypeError("fetch failed", { cause });
     } else if (method === "getUpdates" && nextUpdate < updates.length) {
       const update = updates[nextUpdate]!;
       if (nextUpdate > 0 && updates[nextUpdate - 1]?.text === "/compact summarize briefly") {
@@ -314,6 +324,9 @@ test("Telegram polling covers busy and successful session-command paths with the
     assert.deepEqual(bashCommands, ["-lc printf success"]);
     assert.deepEqual(userMessages, ["/telegram-reload", "/telegram-new"]);
     assert.equal(abortCount, 1);
+    assert.equal(timeoutInjected, true);
+    assert.deepEqual(getUpdatesOffsets.slice(0, 3), [-1, 0, 0], "a failed poll retries the same update offset");
+    assert.ok(warnings.some((warning) => warning.includes("retrying in 1s (attempt 1)")));
 
     const replacementCtx = {
       ...ctx,
@@ -329,6 +342,7 @@ test("Telegram polling covers busy and successful session-command paths with the
   } finally {
     await events.get("session_shutdown")?.();
     globalThis.fetch = previousFetch;
+    console.warn = previousWarn;
     if (previousToken === undefined) delete process.env.PI_TELEGRAM_BOT_TOKEN;
     else process.env.PI_TELEGRAM_BOT_TOKEN = previousToken;
     if (previousAllowedIds === undefined) delete process.env.PI_TELEGRAM_ALLOWED_USER_IDS;

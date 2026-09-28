@@ -1228,10 +1228,11 @@ export default function (pi: ExtensionAPI) {
           if (pending.length > 0) offset = pending[pending.length - 1].update_id + 1;
           initialized = true;
         }
+        // Keep the long poll bounded; transient network/header timeouts are retried below.
         const updates = await telegramRequest<TelegramUpdate[]>(
           token,
           "getUpdates",
-          { offset, timeout: 25, allowed_updates: ["message", "callback_query"] },
+          { offset, timeout: 20, allowed_updates: ["message", "callback_query"] },
           signal,
         );
         failures = 0;
@@ -1279,9 +1280,11 @@ export default function (pi: ExtensionAPI) {
           }
           return;
         }
+        // Keep the offset unchanged and retry transient polling/network failures with capped exponential backoff.
         failures++;
-        console.error("[telegram-pi] Telegram polling failed:", error);
-        await sleep(Math.min(1000 * 2 ** Math.min(failures - 1, 5), 30_000), signal);
+        const retryDelay = Math.min(1000 * 2 ** Math.min(failures - 1, 5), 30_000);
+        console.warn(`[telegram-pi] Telegram polling request failed; retrying in ${retryDelay / 1000}s (attempt ${failures}).`, error);
+        await sleep(retryDelay, signal);
       }
     }
   }
