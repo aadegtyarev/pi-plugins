@@ -153,7 +153,7 @@ test("registry passes session context and arguments to migrated session command 
   assert.deepEqual(calls, commands.map((command) => `${command}:argument`));
 });
 
-test("Telegram polling dispatches migrated session commands with the current ExtensionContext", async () => {
+test("Telegram polling covers busy and successful session-command paths with the current ExtensionContext", async () => {
   const previousToken = process.env.PI_TELEGRAM_BOT_TOKEN;
   const previousAllowedIds = process.env.PI_TELEGRAM_ALLOWED_USER_IDS;
   const previousEnabled = process.env.PI_TELEGRAM_ENABLED;
@@ -162,10 +162,39 @@ test("Telegram polling dispatches migrated session commands with the current Ext
   process.env.PI_TELEGRAM_ALLOWED_USER_IDS = "7";
   process.env.PI_TELEGRAM_ENABLED = "1";
 
-  const commands = ["/status", "/model", "/effort", "/compact", "/new", "/reload", "/bash echo test", "/cancel"];
+  const updates = [
+    { text: "/status", idle: false },
+    { text: "/model", idle: false },
+    { text: "/model test-provider/test-model", idle: true },
+    { text: "/effort", idle: false },
+    { text: "/effort high", idle: true },
+    { text: "/compact", idle: false },
+    { text: "/compact summarize briefly", idle: true },
+    { text: "/new", idle: false },
+    { text: "/reload", idle: false },
+    { text: "/bash echo busy", idle: false },
+    { text: "/cancel", idle: false },
+    { text: "/reload", idle: true },
+    { text: "/bash printf success", idle: true },
+    { text: "/new", idle: true },
+  ];
   const sent: string[] = [];
-  let deliveredUpdates = false;
-  let messageId = 0;
+  const userMessages: string[] = [];
+  const bashCommands: string[] = [];
+  let nextUpdate = 0;
+  let sessionIdle = false;
+  let nextMessageId = 0;
+  let startupCount = 0;
+  let replacementUpdateDelivered = false;
+  let compactCompleted = false;
+  let currentEffort = "medium";
+  let selectedModel = "";
+  let compactInstructions = "";
+  let abortCount = 0;
+  const availableModel = {
+    provider: "test-provider", id: "test-model", name: "Test model", reasoning: true,
+    thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high" },
+  };
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     const method = url.pathname.split("/").at(-1);
@@ -173,12 +202,29 @@ test("Telegram polling dispatches migrated session commands with the current Ext
     let result: unknown;
     if (method === "getUpdates" && body.offset === -1) {
       result = [];
-    } else if (method === "getUpdates" && !deliveredUpdates) {
-      deliveredUpdates = true;
-      result = commands.map((text, index) => ({
-        update_id: index + 1,
-        message: { message_id: index + 1, from: { id: 7 }, chat: { id: 42, type: "private" }, text },
-      }));
+    } else if (method === "getUpdates" && nextUpdate < updates.length) {
+      const update = updates[nextUpdate]!;
+      if (nextUpdate > 0 && updates[nextUpdate - 1]?.text === "/compact summarize briefly") {
+        const signal = init?.signal;
+        while (!compactCompleted && !signal?.aborted) await new Promise((resolve) => setTimeout(resolve, 1));
+        if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
+      if (update.text === "/new" && update.idle) {
+        const signal = init?.signal;
+        while (!sent.some((text) => text.includes("Exit code: 0") && text.includes("bash output")) && !signal?.aborted) {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
+      sessionIdle = update.idle;
+      result = [{
+        update_id: nextUpdate + 1,
+        message: { message_id: nextUpdate + 1, from: { id: 7 }, chat: { id: 42, type: "private" }, text: update.text },
+      }];
+      nextUpdate++;
+    } else if (method === "getUpdates" && startupCount > 1 && !replacementUpdateDelivered) {
+      replacementUpdateDelivered = true;
+      result = [{ update_id: 100, message: { message_id: 100, from: { id: 7 }, chat: { id: 42, type: "private" }, text: "/status" } }];
     } else if (method === "getUpdates") {
       const signal = init?.signal;
       await new Promise<never>((_resolve, reject) => {
@@ -187,8 +233,9 @@ test("Telegram polling dispatches migrated session commands with the current Ext
       });
     } else if (method === "sendMessage") {
       sent.push(String(body.text));
-      result = { message_id: ++messageId };
+      result = { message_id: ++nextMessageId };
     } else if (method === "getMe") {
+      startupCount++;
       result = { id: 1, is_bot: true, first_name: "test", username: "test_bot" };
     } else {
       result = true;
@@ -204,15 +251,28 @@ test("Telegram polling dispatches migrated session commands with the current Ext
     on(event: string, handler: (...args: any[]) => unknown) { events.set(event, handler); },
     events: { on() {} },
     getFlag: () => false,
-    getThinkingLevel: () => "medium",
-    sendUserMessage() {},
+    getThinkingLevel: () => currentEffort,
+    setThinkingLevel: (effort: string) => { currentEffort = effort; },
+    setModel: async (model: typeof availableModel) => { selectedModel = `${model.provider}/${model.id}`; return true; },
+    sendUserMessage: (text: string) => { userMessages.push(text); },
+    exec: async (_command: string, args: string[]) => {
+      bashCommands.push(args.join(" "));
+      return { code: 0, killed: false, stdout: "bash output", stderr: "" };
+    },
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: process.cwd(),
-    model: { provider: "test-provider", id: "test-model" },
-    modelRegistry: { getAvailable: () => [] },
-    isIdle: () => false,
-    abort() {},
+    model: { ...availableModel },
+    modelRegistry: { getAvailable: () => [availableModel] },
+    isIdle: () => sessionIdle,
+    abort: () => { abortCount++; },
+    compact: (options: { customInstructions?: string; onComplete?: () => void }) => {
+      compactInstructions = options.customInstructions ?? "";
+      setTimeout(() => {
+        options.onComplete?.();
+        compactCompleted = true;
+      }, 0);
+    },
     getContextUsage: () => null,
     sessionManager: {
       getEntries: () => [],
@@ -225,19 +285,47 @@ test("Telegram polling dispatches migrated session commands with the current Ext
   try {
     telegramExtension(pi);
     await events.get("session_start")?.({}, ctx);
-    const deadline = Date.now() + 3000;
-    while (sent.length < commands.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    const expectedResponses = 16;
+    const deadline = Date.now() + 5000;
+    while ((sent.length < expectedResponses || userMessages.length < 2 || nextUpdate < updates.length) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
 
-    assert.equal(sent.length, commands.length, `Expected one response for each command; got: ${sent.join(" | ")}`);
-    assert.match(sent[0], /Model: test-provider\/test-model/);
-    assert.match(sent[1], /No models are available/);
-    assert.match(sent[2], /Current effort: medium/);
-    assert.match(sent[3], /Context can be compacted after/);
-    assert.match(sent[4], /A new session can be started after/);
-    assert.match(sent[5], /Wait for the current task to finish before reloading/);
-    assert.match(sent[6], /Pi is busy\. Bash can run/);
-    assert.match(sent[7], /Stopping the current task/);
+    assert.equal(sent.length, expectedResponses, `Expected ${expectedResponses} Telegram responses; got: ${sent.join(" | ")}`);
+    assert.ok(sent.some((text) => text.includes("Pi is busy.")));
+    assert.ok(sent.some((text) => text.includes("Available models (1)")));
+    assert.ok(sent.some((text) => text.includes("Model selected: test-provider/test-model")));
+    assert.ok(sent.some((text) => text.includes("Current effort: medium")));
+    assert.ok(sent.some((text) => text.includes("Effort set to high.")));
+    assert.ok(sent.some((text) => text.includes("Context can be compacted after")));
+    assert.ok(sent.some((text) => text.includes("Context compaction complete.")));
+    assert.ok(sent.some((text) => text.includes("A new session can be started after")));
+    assert.ok(sent.some((text) => text.includes("Wait for the current task to finish before reloading.")));
+    assert.ok(sent.some((text) => text.includes("Pi is busy. Bash can run")));
+    assert.ok(sent.some((text) => text.includes("Stopping the current task…")));
+    assert.ok(sent.some((text) => text.includes("Reloading Pi extensions and resources…")));
+    assert.ok(sent.some((text) => text.includes("Running Bash command…")));
+    assert.ok(sent.some((text) => text.includes("Exit code: 0") && text.includes("bash output")));
+    assert.ok(sent.some((text) => text.includes("Creating a new Pi session…")));
     assert.ok(sent.every((text) => !text.includes("Unknown command")));
+    assert.equal(selectedModel, "test-provider/test-model");
+    assert.equal(currentEffort, "high");
+    assert.equal(compactInstructions, "summarize briefly");
+    assert.deepEqual(bashCommands, ["-lc printf success"]);
+    assert.deepEqual(userMessages, ["/telegram-reload", "/telegram-new"]);
+    assert.equal(abortCount, 1);
+
+    const replacementCtx = {
+      ...ctx,
+      model: { ...availableModel, provider: "replacement-provider", id: "replacement-model" },
+      sessionManager: { ...ctx.sessionManager, getSessionId: () => "replacement-session" },
+    } as ExtensionContext;
+    await events.get("session_start")?.({}, replacementCtx);
+    const replacementDeadline = Date.now() + 3000;
+    while (sent.length < expectedResponses + 1 && Date.now() < replacementDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(sent.length, expectedResponses + 1);
+    assert.match(sent.at(-1)!, /Model: replacement-provider\/replacement-model/);
+    assert.match(sent.at(-1)!, /ID: replacement-session/);
   } finally {
     await events.get("session_shutdown")?.();
     globalThis.fetch = previousFetch;
