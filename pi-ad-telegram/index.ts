@@ -443,7 +443,7 @@ export default function (pi: ExtensionAPI) {
 
   function tellPi(ctx: ExtensionContext, text: string): void {
     if (ctx.hasUI) ctx.ui.notify(text, "warning");
-    else console.error(`[telegram-pi] ${text}`);
+    else console.error(`[pi-ad-telegram] ${text}`);
   }
 
   async function reply(chatId: number, text: string, signal: AbortSignal, formatMarkdown = false): Promise<void> {
@@ -451,7 +451,7 @@ export default function (pi: ExtensionAPI) {
     try {
       await sendTelegramMessage(telegramRequest, botToken, chatId, { text, format: formatMarkdown ? "markdown" : "plain" }, signal);
     } catch (error) {
-      if (!signal.aborted) console.error("[telegram-pi] Failed to send Telegram message:", error);
+      if (!signal.aborted) console.error("[pi-ad-telegram] Failed to send Telegram message:", error);
     }
   }
 
@@ -471,7 +471,7 @@ export default function (pi: ExtensionAPI) {
       await deleteTelegramMessage(botToken, task.chatId, task.noticeMessageId, signal);
       return true;
     } catch (error) {
-      if (!signal.aborted) console.error("[telegram-pi] Failed to remove queued-task notice:", error);
+      if (!signal.aborted) console.error("[pi-ad-telegram] Failed to remove queued-task notice:", error);
       return false;
     }
   }
@@ -497,7 +497,7 @@ export default function (pi: ExtensionAPI) {
         }, signal);
       },
       onError: (stage, error) => {
-        if (!signal.aborted) console.error(`[telegram-pi] Failed to finalize queue task (${stage}):`, error);
+        if (!signal.aborted) console.error(`[pi-ad-telegram] Failed to finalize queue task (${stage}):`, error);
       },
     });
   }
@@ -770,13 +770,13 @@ export default function (pi: ExtensionAPI) {
     try {
       await telegramRequest<true>(token, "setMyCommands", { commands: getTelegramCommandMenu() }, nextController.signal);
     } catch (error) {
-      console.error("[telegram-pi] Failed to register Telegram commands:", error);
+      console.error("[pi-ad-telegram] Failed to register Telegram commands:", error);
       tellPi(ctx, `Telegram connected, but the command menu could not be updated: ${String(error)}`);
     }
     botToken = token;
     controller = nextController;
     pollTask = pollTelegram(token, allowedIds, nextController.signal).catch((error) => {
-      if (!nextController.signal.aborted) console.error("[telegram-pi] Polling stopped:", error);
+      if (!nextController.signal.aborted) console.error("[pi-ad-telegram] Polling stopped:", error);
     });
     tellPi(ctx, "Telegram bot is connecting to this Pi session.");
     return true;
@@ -811,7 +811,7 @@ export default function (pi: ExtensionAPI) {
         if (!signal.aborted && botToken && (activityChatId === undefined || activityChatId === chatId)) await action();
       })
       .catch((error) => {
-        if (!signal.aborted) console.error("[telegram-pi] Failed to update Telegram activity:", error);
+        if (!signal.aborted) console.error("[pi-ad-telegram] Failed to update Telegram activity:", error);
       });
     return activityQueue;
   }
@@ -868,17 +868,17 @@ export default function (pi: ExtensionAPI) {
           await telegramRequest<true>(token, "unpinChatMessage", { chat_id: targetChatId, message_id: messageId }, requestSignal);
         },
       });
-      if (errors.staleUnpin && !signal.aborted) console.error("[telegram-pi] Could not clear the previous pinned agent board:", errors.staleUnpin);
+      if (errors.staleUnpin && !signal.aborted) console.error("[pi-ad-telegram] Could not clear the previous pinned agent board:", errors.staleUnpin);
       if (errors.pin) {
-        console.error("[telegram-pi] Could not pin the background-agent board:", errors.pin);
+        console.error("[pi-ad-telegram] Could not pin the background-agent board:", errors.pin);
         await reply(chatId, `Could not pin the agent board; it will remain a regular message. Telegram error: ${String(errors.pin).slice(0, 240)}`, signal);
       }
       if (errors.unpin) {
-        console.error("[telegram-pi] Could not unpin the background-agent board:", errors.unpin);
+        console.error("[pi-ad-telegram] Could not unpin the background-agent board:", errors.unpin);
         await reply(chatId, `Could not automatically unpin the agent board. Telegram error: ${String(errors.unpin).slice(0, 240)}`, signal);
       }
     }).catch((error) => {
-      if (!signal.aborted) console.error("[telegram-pi] Failed to update background-agent board:", error);
+      if (!signal.aborted) console.error("[pi-ad-telegram] Failed to update background-agent board:", error);
     });
     return agentBoardQueue;
   }
@@ -1042,7 +1042,7 @@ export default function (pi: ExtensionAPI) {
           await deleteTelegramMessage(botToken, chatId, activityMessageIds[index], signal);
         } catch (error) {
           if (signal.aborted) return;
-          console.error("[telegram-pi] Failed to delete extra Telegram activity message:", error);
+          console.error("[pi-ad-telegram] Failed to delete extra Telegram activity message:", error);
         }
       }
       activityMessageIds.length = parts.length;
@@ -1059,7 +1059,7 @@ export default function (pi: ExtensionAPI) {
           await deleteTelegramMessage(botToken, chatId, messageId, signal);
         } catch (error) {
           if (signal.aborted) return;
-          console.error("[telegram-pi] Failed to delete Telegram activity:", error);
+          console.error("[pi-ad-telegram] Failed to delete Telegram activity:", error);
         }
       }
     }
@@ -1269,7 +1269,7 @@ export default function (pi: ExtensionAPI) {
         if (signal.aborted) return;
         const message = String(error);
         if (/\b(401|409)\b|unauthorized|conflict/i.test(message)) {
-          console.error("[telegram-pi] Telegram polling stopped:", error);
+          console.error("[pi-ad-telegram] Telegram polling stopped:", error);
           const chatId = activeChatId ?? agentBoardPublisher.chatId;
           if (chatId !== undefined) await reply(chatId, `Telegram polling stopped: ${message}`, signal);
           if (currentContext) tellPi(currentContext, `Telegram polling stopped: ${message}`);
@@ -1283,7 +1283,7 @@ export default function (pi: ExtensionAPI) {
         // Keep the offset unchanged and retry transient polling/network failures with capped exponential backoff.
         failures++;
         const retryDelay = Math.min(1000 * 2 ** Math.min(failures - 1, 5), 30_000);
-        console.warn(`[telegram-pi] Telegram polling request failed; retrying in ${retryDelay / 1000}s (attempt ${failures}).`, error);
+        console.warn(`[pi-ad-telegram] Telegram polling request failed; retrying in ${retryDelay / 1000}s (attempt ${failures}).`, error);
         await sleep(retryDelay, signal);
       }
     }
@@ -1350,7 +1350,7 @@ export default function (pi: ExtensionAPI) {
             }
           }
         } catch (error) {
-          console.error("[telegram-pi] Failed to locate edited lines:", error);
+          console.error("[pi-ad-telegram] Failed to locate edited lines:", error);
         }
       }
     }
@@ -1457,11 +1457,11 @@ export default function (pi: ExtensionAPI) {
         try {
           pi.sendUserMessage(nudge, currentContext?.isIdle() ? undefined : { deliverAs: "followUp" });
         } catch (error) {
-          console.error("[telegram-pi] Failed to queue subagent summary:", error);
+          console.error("[pi-ad-telegram] Failed to queue subagent summary:", error);
         }
       }
       backgroundAgentLaunches.delete(event.id);
-    }).catch((error) => console.error("[telegram-pi] Failed to process background-agent event:", error));
+    }).catch((error) => console.error("[pi-ad-telegram] Failed to process background-agent event:", error));
   });
 
   pi.on("tool_execution_end", (event) => {
