@@ -44,7 +44,9 @@ Telegram bot commands:
 - `/bash <command>` — run a Bash command in Pi's current working directory and send back its stdout, stderr, and exit code. Long output is split across messages. For commands that read stdin, pass input in the command (for example, `/bash printf 'y\n' | command`).
 - `/reload` — reload extensions and other Pi resources without restarting the Pi process.
 - `/cancel` — abort the current Pi operation or Bash command.
-- `/help` — show help.
+- `/help` — show help, including Telegram-compatible commands from active Pi extensions.
+
+Telegram's command menu is built from the commands available in the current Pi session. Extension slash commands with Telegram-compatible names are shown only while their extension is loaded; they are forwarded to Pi and can be queued while Pi is busy. The menu is refreshed when the bot starts and after `/reload`. Commands whose names are not valid Telegram commands, and Pi's internal `telegram*` control commands, are not exposed.
 
 When you send a document or photo, the bot saves it in `.telegram-inbox/` in the project and passes its path to Pi so the agent can inspect it. When you ask Pi to send you a file, it can use the `telegram_send_file` tool to upload that file to the chat. Tool calls are sent while a Telegram task runs; tool-output messages are not forwarded. Web activity shows compact search queries, fetched page host/path (URL query strings are omitted), source-check claims, and stored-content retrieval targets. Long activity timelines continue in additional edited-in-place messages; the whole set is deleted when the parent task settles. Long outputs and answers are split across Telegram messages. Model and effort changes apply to the current session and can only be made while Pi is idle.
 
@@ -56,7 +58,7 @@ When a parent turn launches a background subagent, Pi returns the answer and Tel
 
 ## Development architecture
 
-- `commands.ts` is the source of truth for Telegram command names, aliases, menu entries, and help text. `command-registry.ts` routes canonical names and aliases to handlers; `index.ts` registers behavior with access to the current Pi session.
+- `commands.ts` defines built-in Telegram command names, aliases, menu entries, and help text, and derives Telegram-compatible plugin commands from the active Pi session. `command-registry.ts` routes built-in names and aliases to handlers; `index.ts` forwards available plugin slash commands into Pi.
 - `queue.ts` owns FIFO storage, capacity, chat-scoped removal, and queue-notice completion fallback; Telegram API calls remain injected from `index.ts`.
 - `agent-board.ts` owns the active batch and pinned-message lifecycle: parallel runs share one board, completed boards remain unpinned, and the next batch gets a new message.
 - `message-renderer.ts` is the shared formatting, safe chunking, fallback, send, and edit path for user replies, queue messages, activity updates, and the agent board. Keep message-specific layout in its caller; put cross-message formatting or delivery fixes here.

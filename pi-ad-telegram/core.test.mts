@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentBoardPublisher, type AgentBoardTransport, BackgroundAgentBatch } from "./agent-board.ts";
-import { getTelegramCommandMenu, normalizeTelegramCommand, TELEGRAM_COMMAND_DEFINITIONS, telegramHelpText } from "./commands.ts";
+import { getPluginTelegramCommands, getTelegramCommandMenu, isPluginTelegramCommand, normalizeTelegramCommand, TELEGRAM_COMMAND_DEFINITIONS, telegramHelpText } from "./commands.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
 import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue } from "./queue.ts";
 import { renderTelegramMessage, sendTelegramMessage, type TelegramRequester } from "./message-renderer.ts";
@@ -267,6 +267,7 @@ test("Telegram polling covers busy and successful session-command paths with the
     events: { on() {} },
     getFlag: () => false,
     getThinkingLevel: () => currentEffort,
+    getCommands: () => [],
     setThinkingLevel: (effort: string) => { currentEffort = effort; },
     setModel: async (model: typeof availableModel) => { selectedModel = `${model.provider}/${model.id}`; return true; },
     sendUserMessage: (text: string) => { userMessages.push(text); },
@@ -355,6 +356,25 @@ test("Telegram polling covers busy and successful session-command paths with the
     if (previousEnabled === undefined) delete process.env.PI_TELEGRAM_ENABLED;
     else process.env.PI_TELEGRAM_ENABLED = previousEnabled;
   }
+});
+
+test("plugin commands are exposed only when available in the Pi session", () => {
+  const commands = [
+    { name: "cwd", description: "Show current directory", source: "extension" },
+    { name: "workflow", description: "Run workflow", source: "extension" },
+    { name: "feature", description: "Feature prompt", source: "prompt" },
+    { name: "invalid-name", description: "Invalid Telegram name", source: "extension" },
+    { name: "start", description: "Override built-in", source: "extension" },
+    { name: "telegram-reload", description: "Internal command", source: "extension" },
+  ];
+  assert.deepEqual(getPluginTelegramCommands(commands), [
+    { command: "cwd", description: "Show current directory" },
+    { command: "workflow", description: "Run workflow" },
+  ]);
+  assert.ok(getTelegramCommandMenu(commands).some((command) => command.command === "cwd"));
+  assert.equal(isPluginTelegramCommand("cwd", commands), true);
+  assert.equal(isPluginTelegramCommand("cwd", []), false);
+  assert.ok(telegramHelpText(commands).includes("/cwd — Show current directory"));
 });
 
 test("command menu, aliases, and help share one definition list", () => {

@@ -6,7 +6,7 @@ import { installBackgroundAdapters } from "./background-adapters/index.ts";
 import type { BackgroundWorkEvent } from "./background-adapters/types.ts";
 import { AgentBoardPublisher, BackgroundAgentBatch } from "./agent-board.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
-import { getTelegramCommandMenu, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
+import { getTelegramCommandMenu, isPluginTelegramCommand, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
 import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue, type QueueTaskFinalState, type QueuedTelegramTask } from "./queue.ts";
 import { editTelegramMessage, escapeHtml, MAX_TELEGRAM_MESSAGE_LENGTH as MAX_MESSAGE_LENGTH, sendTelegramMessage } from "./message-renderer.ts";
 
@@ -391,6 +391,13 @@ export default function (pi: ExtensionAPI) {
     description: "Reload Pi extensions and resources from Telegram",
     handler: async (_args, ctx) => {
       await ctx.reload();
+      if (botToken && controller && !controller.signal.aborted) {
+        try {
+          await telegramRequest<true>(botToken, "setMyCommands", { commands: getTelegramCommandMenu(pi.getCommands()) }, controller.signal);
+        } catch (error) {
+          console.error("[pi-ad-telegram] Failed to refresh Telegram commands after reload:", error);
+        }
+      }
     },
   });
 
@@ -509,7 +516,7 @@ export default function (pi: ExtensionAPI) {
 
   const commandRegistry = new TelegramCommandRegistry<{ chatId: number; signal: AbortSignal; ctx: ExtensionContext | undefined }>();
   commandRegistry.register("start", async ({ chatId, signal }) => {
-    await reply(chatId, telegramHelpText(), signal);
+    await reply(chatId, telegramHelpText(pi.getCommands()), signal);
   });
   commandRegistry.register("queue", async ({ chatId, signal }) => {
     await reply(chatId, formatQueueListing(queuedTasks.listForChat(chatId)), signal, true);
@@ -773,7 +780,7 @@ export default function (pi: ExtensionAPI) {
       return false;
     }
     try {
-      await telegramRequest<true>(token, "setMyCommands", { commands: getTelegramCommandMenu() }, nextController.signal);
+      await telegramRequest<true>(token, "setMyCommands", { commands: getTelegramCommandMenu(pi.getCommands()) }, nextController.signal);
     } catch (error) {
       console.error("[pi-ad-telegram] Failed to register Telegram commands:", error);
       tellPi(ctx, `Telegram connected, but the command menu could not be updated: ${String(error)}`);
@@ -1173,6 +1180,21 @@ export default function (pi: ExtensionAPI) {
 
     if (await commandRegistry.dispatch(command, args, { chatId, signal, ctx })) return;
 
+    if (command && ctx && isPluginTelegramCommand(command, pi.getCommands())) {
+      const taskText = `/${command}${args ? ` ${args}` : ""}`;
+      if (!ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined || drainingQueue) {
+        const task = queuedTasks.enqueue(chatId, taskText, message.message_id);
+        if (!task) {
+          await reply(chatId, `Queue is full (maximum ${MAX_QUEUED_TASKS} tasks). The command was not added; try again later or use /clear_queue.`, signal);
+          return;
+        }
+        await sendQueuedTask(chatId, task, signal);
+        return;
+      }
+      await dispatchTask(chatId, taskText, ctx, signal);
+      return;
+    }
+
     if (command) {
       await reply(chatId, "Unknown command. Send /help for assistance.", signal);
       return;
@@ -1208,7 +1230,7 @@ export default function (pi: ExtensionAPI) {
     try {
       void refreshActivity(chatId, signal);
       if (signal.aborted) return;
-      pi.sendUserMessage(taskText);
+      pi.sendUserMessage(taskText, { expandPromptTemplates: true });
     } catch (error) {
       activeChatId = undefined;
       await reply(chatId, `Failed to send the task to Pi: ${String(error)}`, signal);
