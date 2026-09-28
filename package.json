@@ -1,10 +1,11 @@
 {
   "name": "pi-plugins",
   "private": true,
+  "type": "module",
   "description": "Pi extension collection",
   "scripts": {
-    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck telegram/index.ts telegram/message-renderer.ts telegram/message-renderer.test.mts telegram/background-adapters/*.ts",
-    "test": "node --test telegram/message-renderer.test.mts"
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck pi-ad-telegram/index.ts pi-ad-telegram/message-renderer.ts pi-ad-telegram/core.test.mts pi-ad-telegram/background-adapters/*.ts",
+    "test": "node --test pi-ad-telegram/core.test.mts"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.87.1",

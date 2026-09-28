@@ -2,12 +2,13 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { installBackgroundAdapters } from "./background-adapters";
-import type { BackgroundWorkEvent } from "./background-adapters/types";
-import { BackgroundAgentBatch } from "./agent-board";
-import { getTelegramCommandMenu, normalizeTelegramCommand, telegramHelpText } from "./commands";
-import { MAX_QUEUED_TASKS, TelegramTaskQueue, type QueuedTelegramTask } from "./queue";
-import { editTelegramMessage, escapeHtml, MAX_TELEGRAM_MESSAGE_LENGTH as MAX_MESSAGE_LENGTH, sendTelegramMessage } from "./message-renderer";
+import { installBackgroundAdapters } from "./background-adapters/index.ts";
+import type { BackgroundWorkEvent } from "./background-adapters/types.ts";
+import { AgentBoardPublisher, BackgroundAgentBatch } from "./agent-board.ts";
+import { TelegramCommandRegistry } from "./command-registry.ts";
+import { getTelegramCommandMenu, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
+import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, TelegramTaskQueue, type QueuedTelegramTask } from "./queue.ts";
+import { editTelegramMessage, escapeHtml, MAX_TELEGRAM_MESSAGE_LENGTH as MAX_MESSAGE_LENGTH, sendTelegramMessage } from "./message-renderer.ts";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -355,14 +356,10 @@ export default function (pi: ExtensionAPI) {
   let activityCacheHitRate: number | undefined;
   let activityCost = 0;
   let activityQueue: Promise<void> = Promise.resolve();
-  let agentBoardMessageId: number | undefined;
-  let agentBoardChatId: number | undefined;
   let agentBoardQueue: Promise<void> = Promise.resolve();
   let agentBoardRefreshTimer: ReturnType<typeof setInterval> | undefined;
   let agentBoardPolling = false;
-  let agentBoardRenderedText = "";
-  let agentBoardPinned = false;
-  let agentBoardPinUnavailable = false;
+  const agentBoardPublisher = new AgentBoardPublisher();
   const backgroundAgents = new BackgroundAgentBatch();
   const backgroundAgentLaunches = new Map<string, { chatId: number; agent: string }>();
   const toolCalls = new Map<string, { summary: string; status: "running" | "done" | "failed"; exitLabel?: string }>();
@@ -468,39 +465,270 @@ export default function (pi: ExtensionAPI) {
     task.noticeMessageId = messageId;
   }
 
-  async function deleteQueueNotice(task: QueuedTelegramTask, signal: AbortSignal): Promise<void> {
-    if (!botToken || task.noticeMessageId === undefined) return;
+  async function deleteQueueNotice(task: QueuedTelegramTask, signal: AbortSignal): Promise<boolean> {
+    if (!botToken || task.noticeMessageId === undefined) return true;
     try {
       await deleteTelegramMessage(botToken, task.chatId, task.noticeMessageId, signal);
+      return true;
     } catch (error) {
       if (!signal.aborted) console.error("[telegram-pi] Failed to remove queued-task notice:", error);
+      return false;
     }
   }
 
   async function closeQueuedTask(task: QueuedTelegramTask, state: "взята в работу" | "отменена", emoji: "✅" | "❌", signal: AbortSignal): Promise<void> {
     if (!botToken) return;
-    if (task.replyToMessageId !== undefined) {
-      try {
-        await telegramRequest<unknown>(botToken, "setMessageReaction", {
+    await finalizeQueueNotice({
+      signal,
+      ...(task.replyToMessageId !== undefined ? {
+        react: () => telegramRequest<unknown>(botToken!, "setMessageReaction", {
           chat_id: task.chatId,
           message_id: task.replyToMessageId,
           reaction: [{ type: "emoji", emoji }],
           is_big: false,
+        }, signal),
+      } : {}),
+      deleteNotice: () => deleteQueueNotice(task, signal),
+      editNotice: async () => {
+        if (task.noticeMessageId === undefined) return;
+        await editTelegramMessage(telegramRequest, botToken!, task.chatId, task.noticeMessageId, {
+          text: `${emoji} Задача ${task.id} ${state}.`,
+          replyMarkup: { inline_keyboard: [] },
         }, signal);
-        await deleteQueueNotice(task, signal);
-        return;
-      } catch (error) {
-        if (signal.aborted) return;
-        console.error("[telegram-pi] Failed to react to queued message:", error);
-      }
-    }
-    if (task.noticeMessageId !== undefined) {
-      await editTelegramMessage(telegramRequest, botToken, task.chatId, task.noticeMessageId, {
-        text: `${emoji} Задача ${task.id} ${state}.`,
-        replyMarkup: { inline_keyboard: [] },
-      }, signal);
-    }
+      },
+      onError: (stage, error) => {
+        if (!signal.aborted) console.error(`[telegram-pi] Failed to finalize queue task (${stage}):`, error);
+      },
+    });
   }
+
+  const commandRegistry = new TelegramCommandRegistry<{ chatId: number; signal: AbortSignal; ctx: ExtensionContext | undefined }>();
+  commandRegistry.register("start", async ({ chatId, signal }) => {
+    await reply(chatId, telegramHelpText(), signal);
+  });
+  commandRegistry.register("queue", async ({ chatId, signal }) => {
+    await reply(chatId, formatQueueListing(queuedTasks.listForChat(chatId)), signal, true);
+  });
+  commandRegistry.register("queue_cancel", async ({ chatId, signal }, args) => {
+    const id = parseQueueCancelId(args);
+    const removed = id ? queuedTasks.remove(id, chatId) : undefined;
+    if (!removed) await reply(chatId, "Не нашёл такую задачу в вашей очереди. Посмотреть ID: /queue", signal);
+    else await closeQueuedTask(removed, "отменена", "❌", signal);
+  });
+  commandRegistry.register("clear_queue", async ({ chatId, signal }) => {
+    const chatTasks = queuedTasks.removeAllForChat(chatId);
+    for (const task of chatTasks) await closeQueuedTask(task, "отменена", "❌", signal);
+    await reply(chatId, `Очередь очищена; удалено задач: ${chatTasks.length}.`, signal);
+  });
+  commandRegistry.register("agents", async ({ chatId, signal }) => {
+    if (!backgroundAgents.hasRunning()) {
+      await reply(chatId, "Активных фоновых сабагентов сейчас нет. Завершённые группы остаются в чате обычными сообщениями.", signal);
+      return;
+    }
+    if (activeChatId !== undefined && controller) await refreshAgentBoard(chatId, controller.signal);
+    else await refreshAgentBoard(chatId, signal);
+    await reply(chatId, "Статус активной группы обновлён на закреплённой доске. После завершения всех агентов доска будет откреплена и останется в чате.", signal);
+  });
+
+  const isSessionBusy = (ctx: ExtensionContext): boolean =>
+    !ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined;
+
+  commandRegistry.register("status", async ({ chatId, signal, ctx }) => {
+    if (!ctx) {
+      await reply(chatId, "Сессия Pi ещё не готова.", signal);
+      return;
+    }
+    const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "не выбрана";
+    await reply(chatId,
+      `Pi ${isSessionBusy(ctx) ? "сейчас работает" : "свободен и ждёт задачу"}.\nМодель: ${model}\nEffort: ${pi.getThinkingLevel()}\n${contextUsageText(ctx)}\n\n${sessionReportText(ctx)}`,
+      signal,
+    );
+  });
+
+  commandRegistry.register("model", async ({ chatId, signal, ctx }, args) => {
+    if (!ctx) {
+      await reply(chatId, "Сессия Pi ещё не готова.", signal);
+      return;
+    }
+    const models = [...ctx.modelRegistry.getAvailable()].sort((a, b) =>
+      `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`),
+    );
+    if (!args) {
+      if (models.length === 0) {
+        await reply(chatId, "Нет доступных моделей. Проверьте настройки авторизации Pi.", signal);
+        return;
+      }
+      const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+      const shown = models.slice(0, 50).map((model) => {
+        const id = `${model.provider}/${model.id}`;
+        return `${id === current ? "✓ " : ""}${id} — ${model.name}`;
+      });
+      const more = models.length > shown.length
+        ? `\n… и ещё ${models.length - shown.length}. Выберите модель по полному provider/model-id.`
+        : "";
+      await reply(chatId, `Доступные модели (${models.length}):\n${shown.join("\n")}${more}\n\nВыбрать: /model provider/model-id`, signal);
+      return;
+    }
+    if (isSessionBusy(ctx)) {
+      await reply(chatId, "Сменить модель можно после завершения текущей задачи.", signal);
+      return;
+    }
+    const normalized = args.toLowerCase();
+    const matches = models.filter((model) =>
+      `${model.provider}/${model.id}`.toLowerCase() === normalized ||
+      model.id.toLowerCase() === normalized || model.name.toLowerCase() === normalized,
+    );
+    if (matches.length === 0) {
+      await reply(chatId, `Модель «${args}» не найдена среди доступных. Отправьте /model для списка.`, signal);
+      return;
+    }
+    if (matches.length > 1) {
+      await reply(chatId, `Название неоднозначно. Укажите provider/model-id:\n${matches.map((model) => `${model.provider}/${model.id}`).join("\n")}`, signal);
+      return;
+    }
+    const selected = matches[0];
+    try {
+      if (!(await pi.setModel(selected))) {
+        await reply(chatId, `Не удалось выбрать ${selected.provider}/${selected.id}: нет авторизации провайдера.`, signal);
+        return;
+      }
+      await reply(chatId, `Модель выбрана: ${selected.provider}/${selected.id}\nEffort: ${pi.getThinkingLevel()}`, signal);
+    } catch (error) {
+      await reply(chatId, `Не удалось выбрать модель: ${String(error)}`, signal);
+    }
+  });
+
+  commandRegistry.register("effort", async ({ chatId, signal, ctx }, args) => {
+    if (!ctx) {
+      await reply(chatId, "Сессия Pi ещё не готова.", signal);
+      return;
+    }
+    const levels = availableEfforts(ctx.model);
+    if (!args) {
+      await reply(chatId, `Текущий effort: ${pi.getThinkingLevel()}\nДоступно: ${levels.join(", ")}\nВыбрать: /effort <level>`, signal);
+      return;
+    }
+    if (isSessionBusy(ctx)) {
+      await reply(chatId, "Сменить effort можно после завершения текущей задачи.", signal);
+      return;
+    }
+    const effort = args.toLowerCase();
+    if (!(EFFORT_LEVELS as readonly string[]).includes(effort)) {
+      await reply(chatId, `Неизвестный effort. Доступно: ${levels.join(", ")}.`, signal);
+      return;
+    }
+    if (!levels.includes(effort as EffortLevel)) {
+      await reply(chatId, `Effort «${effort}» не поддерживается этой моделью. Доступно: ${levels.join(", ")}.`, signal);
+      return;
+    }
+    pi.setThinkingLevel(effort as EffortLevel);
+    await reply(chatId, `Effort установлен: ${pi.getThinkingLevel()}.`, signal);
+  });
+
+  commandRegistry.register("compact", async ({ chatId, signal, ctx }, args) => {
+    if (!ctx) {
+      await reply(chatId, "Сессия Pi ещё не готова.", signal);
+      return;
+    }
+    if (isSessionBusy(ctx)) {
+      await reply(chatId, "Сжать контекст можно после завершения текущей задачи.", signal);
+      return;
+    }
+    activeCompactChatId = chatId;
+    await reply(chatId, "Сжимаю контекст…", signal);
+    if (signal.aborted) {
+      activeCompactChatId = undefined;
+      return;
+    }
+    try {
+      ctx.compact({
+        ...(args ? { customInstructions: args } : {}),
+        onComplete: () => {
+          if (activeCompactChatId !== chatId) return;
+          activeCompactChatId = undefined;
+          if (controller) void reply(chatId, "Сжатие контекста завершено.", controller.signal);
+          void drainQueuedTasks();
+        },
+        onError: (error) => {
+          if (activeCompactChatId !== chatId) return;
+          activeCompactChatId = undefined;
+          if (controller) void reply(chatId, `Не удалось сжать контекст: ${error.message}`, controller.signal);
+          void drainQueuedTasks();
+        },
+      });
+    } catch (error) {
+      activeCompactChatId = undefined;
+      await reply(chatId, `Не удалось начать сжатие: ${String(error)}`, signal);
+    }
+  });
+
+  commandRegistry.register("new", async ({ chatId, signal, ctx }, args) => {
+    if (!ctx) {
+      await reply(chatId, "Сессия Pi ещё не готова.", signal);
+      return;
+    }
+    if (args) {
+      await reply(chatId, "Использование: /new", signal);
+      return;
+    }
+    if (isSessionBusy(ctx)) {
+      await reply(chatId, "Начать новую сессию можно после завершения текущей задачи.", signal);
+      return;
+    }
+    pendingNewChatId = chatId;
+    await reply(chatId, "Создаю новую сессию Pi…", signal);
+    if (!signal.aborted) pi.sendUserMessage("/telegram-new", { expandPromptTemplates: true });
+    else pendingNewChatId = undefined;
+  });
+
+  commandRegistry.register("reload", async ({ chatId, signal, ctx }) => {
+    if (!ctx) {
+      await reply(chatId, "Сессия Pi ещё не готова.", signal);
+      return;
+    }
+    if (isSessionBusy(ctx)) {
+      await reply(chatId, "Перед перезагрузкой дождитесь завершения текущей задачи.", signal);
+      return;
+    }
+    await reply(chatId, "Перезагружаю расширения и ресурсы Pi…", signal);
+    pi.sendUserMessage("/telegram-reload", { expandPromptTemplates: true });
+  });
+
+  commandRegistry.register("bash", async ({ chatId, signal, ctx }, args) => {
+    if (!ctx) {
+      await reply(chatId, "Сессия Pi ещё не готова.", signal);
+      return;
+    }
+    if (!args) {
+      await reply(chatId, "Укажите команду: /bash <command>", signal);
+      return;
+    }
+    if (isSessionBusy(ctx)) {
+      await reply(chatId, "Pi занят. Выполнить Bash можно после завершения текущей задачи.", signal);
+      return;
+    }
+    const taskController = new AbortController();
+    bashController = taskController;
+    activeBashChatId = chatId;
+    await reply(chatId, "Выполняю Bash-команду…", signal);
+    if (!signal.aborted) void runBashCommand(chatId, args, ctx.cwd, signal, taskController);
+    else taskController.abort();
+  });
+
+  commandRegistry.register("cancel", async ({ chatId, signal, ctx }) => {
+    if (bashController && activeBashChatId !== undefined) {
+      bashController.abort();
+      await reply(chatId, "Останавливаю Bash-команду…", signal);
+    } else if (activeCompactChatId !== undefined) {
+      await reply(chatId, "Контекст сжимается; дождитесь завершения.", signal);
+    } else if (!ctx || ctx.isIdle()) {
+      await reply(chatId, "Сейчас нет активной задачи.", signal);
+    } else {
+      cancelRequested = true;
+      ctx.abort();
+      await reply(chatId, "Останавливаю текущую задачу…", signal);
+    }
+  });
 
   async function handleQueueCallback(update: TelegramUpdate, signal: AbortSignal): Promise<void> {
     const query = update.callback_query;
@@ -612,68 +840,43 @@ export default function (pi: ExtensionAPI) {
     ensureAgentBoardPolling();
     agentBoardQueue = agentBoardQueue.then(async () => {
       if (signal.aborted || !botToken) return;
-      const hasRunningAgents = backgroundAgents.hasRunning();
-      if (!hasRunningAgents && agentBoardMessageId === undefined) return;
+      const token = botToken;
       const text = renderAgentBoard();
-      let sentNewBoard = false;
-      if (agentBoardMessageId === undefined || agentBoardChatId !== chatId) {
-        try {
-          const chat = await telegramRequest<TelegramChat>(botToken, "getChat", { chat_id: chatId }, signal);
+      const errors = await agentBoardPublisher.refresh(chatId, text, backgroundAgents.hasRunning(), signal, {
+        findPinnedBoard: async (targetChatId, requestSignal) => {
+          const chat = await telegramRequest<TelegramChat>(token, "getChat", { chat_id: targetChatId }, requestSignal);
           const pinnedMessage = chat.pinned_message;
           const pinnedText = pinnedMessage?.text?.replace(/<\/?b>/g, "").replace(/\s+/g, " ").trim();
-          if (pinnedMessage && pinnedText?.startsWith("🤖 Фоновые сабагенты")) {
-            await telegramRequest<true>(botToken, "unpinChatMessage", {
-              chat_id: chatId, message_id: pinnedMessage.message_id,
-            }, signal);
-          }
-        } catch (error) {
-          if (!signal.aborted) console.error("[telegram-pi] Could not clear the previous pinned agent board:", error);
-        }
-        const [messageId] = await sendTelegramMessage(telegramRequest, botToken, chatId, {
-          text, format: "html", disableWebPagePreview: true,
-        }, signal);
-        agentBoardMessageId = messageId;
-        agentBoardChatId = chatId;
-        sentNewBoard = true;
-        agentBoardPinned = false;
-        agentBoardPinUnavailable = false;
+          return pinnedMessage && pinnedText?.startsWith("🤖 Фоновые сабагенты") ? pinnedMessage.message_id : undefined;
+        },
+        sendBoard: async (targetChatId, boardText, requestSignal) => {
+          const [messageId] = await sendTelegramMessage(telegramRequest, token, targetChatId, {
+            text: boardText, format: "html", disableWebPagePreview: true,
+          }, requestSignal);
+          return messageId;
+        },
+        editBoard: async (targetChatId, messageId, boardText, requestSignal) => editTelegramMessage(
+          telegramRequest, token, targetChatId, messageId,
+          { text: boardText, format: "html", disableWebPagePreview: true }, requestSignal,
+        ),
+        pinBoard: async (targetChatId, messageId, requestSignal) => {
+          await telegramRequest<true>(token, "pinChatMessage", {
+            chat_id: targetChatId, message_id: messageId, disable_notification: true,
+          }, requestSignal);
+        },
+        unpinBoard: async (targetChatId, messageId, requestSignal) => {
+          await telegramRequest<true>(token, "unpinChatMessage", { chat_id: targetChatId, message_id: messageId }, requestSignal);
+        },
+      });
+      if (errors.staleUnpin && !signal.aborted) console.error("[telegram-pi] Could not clear the previous pinned agent board:", errors.staleUnpin);
+      if (errors.pin) {
+        console.error("[telegram-pi] Could not pin the background-agent board:", errors.pin);
+        await reply(chatId, `Не удалось закрепить доску сабагентов; она останется обычным сообщением. Ошибка Telegram: ${String(errors.pin).slice(0, 240)}`, signal);
       }
-      if (!sentNewBoard && agentBoardRenderedText !== text) {
-        await editTelegramMessage(telegramRequest, botToken, chatId, agentBoardMessageId, {
-          text, format: "html", disableWebPagePreview: true,
-        }, signal);
+      if (errors.unpin) {
+        console.error("[telegram-pi] Could not unpin the background-agent board:", errors.unpin);
+        await reply(chatId, `Не удалось автоматически открепить доску сабагентов. Ошибка Telegram: ${String(errors.unpin).slice(0, 240)}`, signal);
       }
-      if (hasRunningAgents && !agentBoardPinned && !agentBoardPinUnavailable) {
-        try {
-          await telegramRequest<true>(botToken, "pinChatMessage", {
-            chat_id: chatId, message_id: agentBoardMessageId!, disable_notification: true,
-          }, signal);
-          agentBoardPinned = true;
-        } catch (error) {
-          agentBoardPinUnavailable = true;
-          console.error("[telegram-pi] Could not pin the background-agent board:", error);
-          await reply(chatId, `Не удалось закрепить доску сабагентов; она останется обычным сообщением. Ошибка Telegram: ${String(error).slice(0, 240)}`, signal);
-        }
-      } else if (!hasRunningAgents && agentBoardMessageId !== undefined) {
-        try {
-          if (agentBoardPinned) {
-            await telegramRequest<true>(botToken, "unpinChatMessage", {
-              chat_id: chatId, message_id: agentBoardMessageId,
-            }, signal);
-          }
-          agentBoardPinned = false;
-        } catch (error) {
-          console.error("[telegram-pi] Could not unpin the background-agent board:", error);
-          await reply(chatId, `Не удалось автоматически открепить доску сабагентов. Ошибка Telegram: ${String(error).slice(0, 240)}`, signal);
-        } finally {
-          agentBoardMessageId = undefined;
-          agentBoardChatId = undefined;
-          agentBoardRenderedText = "";
-          agentBoardPinned = false;
-          agentBoardPinUnavailable = false;
-        }
-      }
-      if (agentBoardMessageId !== undefined) agentBoardRenderedText = text;
     }).catch((error) => {
       if (!signal.aborted) console.error("[telegram-pi] Failed to update background-agent board:", error);
     });
@@ -741,7 +944,7 @@ export default function (pi: ExtensionAPI) {
         clearInterval(agentBoardRefreshTimer);
         agentBoardRefreshTimer = undefined;
       }
-      if (agentBoardChatId !== undefined && controller) await refreshAgentBoard(agentBoardChatId, controller.signal);
+      if (agentBoardPublisher.chatId !== undefined && controller) await refreshAgentBoard(agentBoardPublisher.chatId, controller.signal);
     } finally {
       agentBoardPolling = false;
     }
@@ -930,7 +1133,6 @@ export default function (pi: ExtensionAPI) {
 
     const chatId = message.chat.id;
     lastTelegramChatId = chatId;
-    agentBoardChatId = chatId;
     let incomingAttachment = "";
     const attachments = groupedUpdates.flatMap((groupUpdate) => {
       const item = groupUpdate.message;
@@ -964,302 +1166,7 @@ export default function (pi: ExtensionAPI) {
     const args = commandMatch?.[2]?.trim() ?? "";
     const ctx = currentContext;
 
-    if (command === "start") {
-      await reply(chatId, telegramHelpText(), signal);
-      return;
-    }
-
-    if (command === "queue") {
-      const chatTasks = queuedTasks.listForChat(chatId);
-      await reply(chatId, chatTasks.length
-        ? `В вашей очереди ${chatTasks.length} задач:\n${chatTasks.map((task) => `• ID \`${task.id}\`: ${task.text.replace(/\s+/g, " ").slice(0, 180)}`).join("\n")}\n\nУдалить: /queue_cancel <ID>`
-        : "Ваша очередь задач пуста.", signal, true);
-      return;
-    }
-
-    if (command === "queue_cancel" || command === "queue-cancel") {
-      const id = args.split(/\s+/)[0];
-      const removed = id ? queuedTasks.remove(id, chatId) : undefined;
-      if (!removed) await reply(chatId, "Не нашёл такую задачу в вашей очереди. Посмотреть ID: /queue", signal);
-      else await closeQueuedTask(removed, "отменена", "❌", signal);
-      return;
-    }
-
-    if (command === "clear_queue" || command === "clear-queue") {
-      const chatTasks = queuedTasks.removeAllForChat(chatId);
-      for (const task of chatTasks) await closeQueuedTask(task, "отменена", "❌", signal);
-      await reply(chatId, `Очередь очищена; удалено задач: ${chatTasks.length}.`, signal);
-      return;
-    }
-
-    if (command === "agents") {
-      if (!backgroundAgents.hasRunning()) {
-        await reply(chatId, "Активных фоновых сабагентов сейчас нет. Завершённые группы остаются в чате обычными сообщениями.", signal);
-        return;
-      }
-      if (activeChatId !== undefined && controller) await refreshAgentBoard(chatId, controller.signal);
-      else await refreshAgentBoard(chatId, signal);
-      await reply(chatId, "Статус активной группы обновлён на закреплённой доске. После завершения всех агентов доска будет откреплена и останется в чате.", signal);
-      return;
-    }
-
-    if (command === "status") {
-      if (!ctx) {
-        await reply(chatId, "Сессия Pi ещё не готова.", signal);
-      } else {
-        const busy =
-          !ctx.isIdle() ||
-          activeChatId !== undefined ||
-          activeBashChatId !== undefined ||
-          activeCompactChatId !== undefined ||
-          pendingNewChatId !== undefined;
-        const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "не выбрана";
-        await reply(
-          chatId,
-          `Pi ${busy ? "сейчас работает" : "свободен и ждёт задачу"}.\nМодель: ${model}\nEffort: ${pi.getThinkingLevel()}\n${contextUsageText(ctx)}\n\n${sessionReportText(ctx)}`, 
-          signal,
-        );
-      }
-      return;
-    }
-
-    if (command === "model") {
-      if (!ctx) {
-        await reply(chatId, "Сессия Pi ещё не готова.", signal);
-        return;
-      }
-
-      const models = [...ctx.modelRegistry.getAvailable()].sort((a, b) =>
-        `${a.provider}/${a.id}`.localeCompare(`${b.provider}/${b.id}`),
-      );
-      if (!args) {
-        if (models.length === 0) {
-          await reply(chatId, "Нет доступных моделей. Проверьте настройки авторизации Pi.", signal);
-          return;
-        }
-        const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-        const shown = models.slice(0, 50).map((model) => {
-          const id = `${model.provider}/${model.id}`;
-          return `${id === current ? "✓ " : ""}${id} — ${model.name}`;
-        });
-        const more =
-          models.length > shown.length
-            ? `\n… и ещё ${models.length - shown.length}. Выберите модель по полному provider/model-id.`
-            : "";
-        await reply(
-          chatId,
-          `Доступные модели (${models.length}):\n${shown.join("\n")}${more}\n\nВыбрать: /model provider/model-id`,
-          signal,
-        );
-        return;
-      }
-
-      if (
-        !ctx.isIdle() ||
-        activeChatId !== undefined ||
-        activeBashChatId !== undefined ||
-        activeCompactChatId !== undefined ||
-        pendingNewChatId !== undefined
-      ) {
-        await reply(chatId, "Сменить модель можно после завершения текущей задачи.", signal);
-        return;
-      }
-
-      const normalized = args.toLowerCase();
-      const matches = models.filter(
-        (model) =>
-          `${model.provider}/${model.id}`.toLowerCase() === normalized ||
-          model.id.toLowerCase() === normalized ||
-          model.name.toLowerCase() === normalized,
-      );
-      if (matches.length === 0) {
-        await reply(chatId, `Модель «${args}» не найдена среди доступных. Отправьте /model для списка.`, signal);
-        return;
-      }
-      if (matches.length > 1) {
-        await reply(
-          chatId,
-          `Название неоднозначно. Укажите provider/model-id:\n${matches.map((model) => `${model.provider}/${model.id}`).join("\n")}`,
-          signal,
-        );
-        return;
-      }
-
-      const selected = matches[0];
-      try {
-        if (!(await pi.setModel(selected))) {
-          await reply(chatId, `Не удалось выбрать ${selected.provider}/${selected.id}: нет авторизации провайдера.`, signal);
-          return;
-        }
-        await reply(
-          chatId,
-          `Модель выбрана: ${selected.provider}/${selected.id}\nEffort: ${pi.getThinkingLevel()}`,
-          signal,
-        );
-      } catch (error) {
-        await reply(chatId, `Не удалось выбрать модель: ${String(error)}`, signal);
-      }
-      return;
-    }
-
-    if (command === "effort") {
-      if (!ctx) {
-        await reply(chatId, "Сессия Pi ещё не готова.", signal);
-        return;
-      }
-
-      const levels = availableEfforts(ctx.model);
-      if (!args) {
-        await reply(
-          chatId,
-          `Текущий effort: ${pi.getThinkingLevel()}\nДоступно: ${levels.join(", ")}\nВыбрать: /effort <level>`,
-          signal,
-        );
-        return;
-      }
-      if (
-        !ctx.isIdle() ||
-        activeChatId !== undefined ||
-        activeBashChatId !== undefined ||
-        activeCompactChatId !== undefined ||
-        pendingNewChatId !== undefined
-      ) {
-        await reply(chatId, "Сменить effort можно после завершения текущей задачи.", signal);
-        return;
-      }
-
-      const effort = args.toLowerCase();
-      if (!(EFFORT_LEVELS as readonly string[]).includes(effort)) {
-        await reply(chatId, `Неизвестный effort. Доступно: ${levels.join(", ")}.`, signal);
-        return;
-      }
-      if (!levels.includes(effort as EffortLevel)) {
-        await reply(
-          chatId,
-          `Effort «${effort}» не поддерживается этой моделью. Доступно: ${levels.join(", ")}.`,
-          signal,
-        );
-        return;
-      }
-
-      pi.setThinkingLevel(effort as EffortLevel);
-      await reply(chatId, `Effort установлен: ${pi.getThinkingLevel()}.`, signal);
-      return;
-    }
-
-    if (command === "compact") {
-      if (!ctx) {
-        await reply(chatId, "Сессия Pi ещё не готова.", signal);
-        return;
-      }
-      if (!ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined) {
-        await reply(chatId, "Сжать контекст можно после завершения текущей задачи.", signal);
-        return;
-      }
-
-      activeCompactChatId = chatId;
-      await reply(chatId, "Сжимаю контекст…", signal);
-      if (signal.aborted) {
-        activeCompactChatId = undefined;
-        return;
-      }
-      try {
-        ctx.compact({
-          ...(args ? { customInstructions: args } : {}),
-          onComplete: () => {
-            if (activeCompactChatId !== chatId) return;
-            activeCompactChatId = undefined;
-            if (controller) void reply(chatId, "Сжатие контекста завершено.", controller.signal);
-            void drainQueuedTasks();
-          },
-          onError: (error) => {
-            if (activeCompactChatId !== chatId) return;
-            activeCompactChatId = undefined;
-            if (controller) void reply(chatId, `Не удалось сжать контекст: ${error.message}`, controller.signal);
-            void drainQueuedTasks();
-          },
-        });
-      } catch (error) {
-        activeCompactChatId = undefined;
-        await reply(chatId, `Не удалось начать сжатие: ${String(error)}`, signal);
-      }
-      return;
-    }
-
-    if (command === "new") {
-      if (!ctx) {
-        await reply(chatId, "Сессия Pi ещё не готова.", signal);
-        return;
-      }
-      if (args) {
-        await reply(chatId, "Использование: /new", signal);
-        return;
-      }
-      if (!ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined) {
-        await reply(chatId, "Начать новую сессию можно после завершения текущей задачи.", signal);
-        return;
-      }
-
-      pendingNewChatId = chatId;
-      await reply(chatId, "Создаю новую сессию Pi…", signal);
-      if (!signal.aborted) pi.sendUserMessage("/telegram-new", { expandPromptTemplates: true });
-      else pendingNewChatId = undefined;
-      return;
-    }
-
-    if (command === "reload") {
-      if (!ctx) {
-        await reply(chatId, "Сессия Pi ещё не готова.", signal);
-        return;
-      }
-      if (!ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined) {
-        await reply(chatId, "Перед перезагрузкой дождитесь завершения текущей задачи.", signal);
-        return;
-      }
-
-      await reply(chatId, "Перезагружаю расширения и ресурсы Pi…", signal);
-      pi.sendUserMessage("/telegram-reload", { expandPromptTemplates: true });
-      return;
-    }
-
-    if (command === "bash") {
-      if (!ctx) {
-        await reply(chatId, "Сессия Pi ещё не готова.", signal);
-        return;
-      }
-      if (!args) {
-        await reply(chatId, "Укажите команду: /bash <command>", signal);
-        return;
-      }
-      if (!ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined) {
-        await reply(chatId, "Pi занят. Выполнить Bash можно после завершения текущей задачи.", signal);
-        return;
-      }
-
-      const taskController = new AbortController();
-      bashController = taskController;
-      activeBashChatId = chatId;
-      await reply(chatId, "Выполняю Bash-команду…", signal);
-      if (!signal.aborted) void runBashCommand(chatId, args, ctx.cwd, signal, taskController);
-      else taskController.abort();
-      return;
-    }
-
-    if (command === "cancel") {
-      if (bashController && activeBashChatId !== undefined) {
-        bashController.abort();
-        await reply(chatId, "Останавливаю Bash-команду…", signal);
-      } else if (activeCompactChatId !== undefined) {
-        await reply(chatId, "Контекст сжимается; дождитесь завершения.", signal);
-      } else if (!ctx || ctx.isIdle()) {
-        await reply(chatId, "Сейчас нет активной задачи.", signal);
-      } else {
-        cancelRequested = true;
-        ctx.abort();
-        await reply(chatId, "Останавливаю текущую задачу…", signal);
-      }
-      return;
-    }
+    if (await commandRegistry.dispatch(command, args, { chatId, signal, ctx })) return;
 
     if (command) {
       await reply(chatId, "Неизвестная команда. Напишите /help.", signal);
@@ -1362,7 +1269,7 @@ export default function (pi: ExtensionAPI) {
         const message = String(error);
         if (/\b(401|409)\b|unauthorized|conflict/i.test(message)) {
           console.error("[telegram-pi] Telegram polling stopped:", error);
-          const chatId = activeChatId ?? agentBoardChatId;
+          const chatId = activeChatId ?? agentBoardPublisher.chatId;
           if (chatId !== undefined) await reply(chatId, `Telegram polling остановлен: ${message}`, signal);
           if (currentContext) tellPi(currentContext, `Telegram polling остановлен: ${message}`);
           if (controller?.signal === signal) {
@@ -1501,19 +1408,13 @@ export default function (pi: ExtensionAPI) {
           telegramChatId: chatId,
           startedAt: Date.now(),
         });
-        if (isNewBatch) {
-          agentBoardMessageId = undefined;
-          agentBoardChatId = undefined;
-          agentBoardRenderedText = "";
-          agentBoardPinned = false;
-          agentBoardPinUnavailable = false;
-        }
+        if (isNewBatch) agentBoardPublisher.beginBatch();
         if (controller) {
           const launchSignal = controller.signal;
           await refreshAgentBoard(chatId, launchSignal);
           await reply(
             chatId,
-            `🚀 Запущен фоновый сабагент: ${event.agent}\nОперация: ${backgroundAgents.get(event.id)?.task || "задача скрыта"}\nМодель: ${backgroundAgents.get(event.id)?.model || model}\nСписок и статус: ${agentBoardPinned ? "закреплённая доска" : "/agents"}.`,
+            `🚀 Запущен фоновый сабагент: ${event.agent}\nОперация: ${backgroundAgents.get(event.id)?.task || "задача скрыта"}\nМодель: ${backgroundAgents.get(event.id)?.model || model}\nСписок и статус: ${agentBoardPublisher.isPinned ? "закреплённая доска" : "/agents"}.`,
             launchSignal,
           );
           if (event.statusDirectory) {
@@ -1522,7 +1423,7 @@ export default function (pi: ExtensionAPI) {
               if (entry) {
                 if (resolved.model) entry.model = resolved.model;
                 if (resolved.tokenUsage !== undefined) entry.tokenUsage = resolved.tokenUsage;
-                if (agentBoardChatId !== undefined && controller) void refreshAgentBoard(agentBoardChatId, controller.signal);
+                if (agentBoardPublisher.chatId !== undefined && controller) void refreshAgentBoard(agentBoardPublisher.chatId, controller.signal);
               }
             });
           }

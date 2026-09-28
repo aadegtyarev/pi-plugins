@@ -52,3 +52,44 @@ export class TelegramTaskQueue {
     return this.tasks.shift();
   }
 }
+
+export function formatQueueListing(tasks: QueuedTelegramTask[]): string {
+  if (tasks.length === 0) return "Ваша очередь задач пуста.";
+  const rows = tasks.map((task) => `• ID \`${task.id}\`: ${task.text.replace(/\s+/g, " ").slice(0, 180)}`);
+  return `В вашей очереди ${tasks.length} задач:\n${rows.join("\n")}\n\nУдалить: /queue_cancel <ID>`;
+}
+
+export function parseQueueCancelId(args: string): string | undefined {
+  return args.trim().split(/\s+/)[0] || undefined;
+}
+
+export interface QueueNoticeFinalizer {
+  signal: AbortSignal;
+  react?: () => Promise<unknown>;
+  deleteNotice: () => Promise<boolean>;
+  editNotice: () => Promise<void>;
+  onError?: (stage: "reaction" | "notice deletion", error: unknown) => void;
+}
+
+/** React to the source message, then delete the notice; if either fails, leave an inert status notice. */
+export async function finalizeQueueNotice({ signal, react, deleteNotice, editNotice, onError }: QueueNoticeFinalizer): Promise<void> {
+  if (signal.aborted) return;
+  if (react) {
+    let reactionSucceeded = false;
+    try {
+      await react();
+      reactionSucceeded = true;
+    } catch (error) {
+      onError?.("reaction", error);
+    }
+    if (reactionSucceeded) {
+      try {
+        if (await deleteNotice()) return;
+      } catch (error) {
+        onError?.("notice deletion", error);
+      }
+      if (signal.aborted) return;
+    }
+  }
+  if (!signal.aborted) await editNotice();
+}

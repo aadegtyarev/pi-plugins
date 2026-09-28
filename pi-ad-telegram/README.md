@@ -1,6 +1,6 @@
-# Telegram bridge for Pi
+# pi-ad-telegram — Telegram bridge for Pi
 
-A Pi extension that connects one already-running Pi session to a Telegram bot. It uses Telegram long polling, so no public URL or webhook is required. Runtime uses Pi's installed APIs and Node's built-in `fetch`; repository-level development dependencies provide typechecking and renderer tests.
+A Pi extension that connects one already-running Pi session to a Telegram bot. It uses Telegram long polling, so no public URL or webhook is required. Runtime uses Pi's installed APIs and Node's built-in `fetch`; repository-level development dependencies provide typechecking and plugin tests.
 
 ## Setup
 
@@ -9,7 +9,7 @@ A Pi extension that connects one already-running Pi session to a Telegram bot. I
 3. Make sure the extension is available in Pi's user extensions directory. In this repo it is set up as a symlink:
 
    ```bash
-   ~/.pi/agent/extensions/telegram -> /home/adegtyarev/Develop/Hobby/pi-plugins/telegram
+   ~/.pi/agent/extensions/pi-ad-telegram -> /home/adegtyarev/Develop/Hobby/pi-plugins/pi-ad-telegram
    ```
 
 4. Start Pi from a shell with the bot credentials and the opt-in flag:
@@ -56,11 +56,12 @@ When a parent turn launches a background subagent, Pi returns the answer and Tel
 
 ## Development architecture
 
-- `commands.ts` is the source of truth for Telegram command names, aliases, menu entries, and help text; command behavior is dispatched by `index.ts`.
-- `queue.ts` owns FIFO queue storage, capacity, and chat-scoped removal; Telegram notice/reaction delivery remains in `index.ts`.
+- `commands.ts` is the source of truth for Telegram command names, aliases, menu entries, and help text. `command-registry.ts` routes canonical names and aliases to handlers; `index.ts` registers behavior with access to the current Pi session.
+- `queue.ts` owns FIFO storage, capacity, chat-scoped removal, and queue-notice completion fallback; Telegram API calls remain injected from `index.ts`.
+- `agent-board.ts` owns the active batch and pinned-message lifecycle: parallel runs share one board, completed boards remain unpinned, and the next batch gets a new message.
 - `message-renderer.ts` is the shared formatting, safe chunking, fallback, send, and edit path for user replies, queue messages, activity updates, and the agent board. Keep message-specific layout in its caller; put cross-message formatting or delivery fixes here.
 - `background-adapters/` isolates provider-specific lifecycle events.
 
 Run `npm run typecheck` and `npm test` after changes.
 
-Pi auto-loads this extension because `~/.pi/agent/extensions/telegram` points to this directory and the entry point is `index.ts`. The extension stops polling when the Pi session shuts down. Telegram polling is opt-in: only processes launched with `--telegram` or `PI_TELEGRAM_ENABLED=1`, or explicitly enabled with `/telegram on`, connect to the bot. Leave the environment variable unset (or set it to `0`) in child Pi processes, such as subagents, to avoid competing polling connections.
+Pi auto-loads this extension because `~/.pi/agent/extensions/pi-ad-telegram` points to this directory and the entry point is `index.ts`. The extension stops polling when the Pi session shuts down. Telegram polling is opt-in: only processes launched with `--telegram` or `PI_TELEGRAM_ENABLED=1`, or explicitly enabled with `/telegram on`, connect to the bot. Leave the environment variable unset (or set it to `0`) in child Pi processes, such as subagents, to avoid competing polling connections.

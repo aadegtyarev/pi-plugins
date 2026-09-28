@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { BackgroundWorkSink } from "./types";
+import type { BackgroundWorkSink } from "./types.ts";
 
 interface PendingLaunch {
   agent: string;
