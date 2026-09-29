@@ -6,7 +6,7 @@ import { installBackgroundAdapters } from "./background-adapters/index.ts";
 import type { BackgroundWorkEvent } from "./background-adapters/types.ts";
 import { AgentBoardPublisher, BackgroundAgentBatch } from "./agent-board.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
-import { getTelegramCommandMenu, isPluginTelegramCommand, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
+import { getPluginTelegramCommand, getTelegramCommandMenu, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
 import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue, type QueueTaskFinalState, type QueuedTelegramTask } from "./queue.ts";
 import { editTelegramMessage, escapeHtml, MAX_TELEGRAM_MESSAGE_LENGTH as MAX_MESSAGE_LENGTH, sendTelegramMessage } from "./message-renderer.ts";
 
@@ -1180,8 +1180,9 @@ export default function (pi: ExtensionAPI) {
 
     if (await commandRegistry.dispatch(command, args, { chatId, signal, ctx })) return;
 
-    if (command && ctx && isPluginTelegramCommand(command, pi.getCommands())) {
-      const taskText = `/${command}${args ? ` ${args}` : ""}`;
+    const pluginCommand = command && ctx ? getPluginTelegramCommand(command, pi.getCommands()) : undefined;
+    if (pluginCommand && ctx) {
+      const taskText = `/${pluginCommand.piCommand}${args ? ` ${args}` : ""}`;
       if (!ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined || drainingQueue) {
         const task = queuedTasks.enqueue(chatId, taskText, message.message_id);
         if (!task) {

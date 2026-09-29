@@ -41,18 +41,31 @@ export function normalizeTelegramCommand(command: string): string | undefined {
   return COMMAND_NAMES.get(command.toLowerCase());
 }
 
-export function getPluginTelegramCommands(commands: readonly PiSessionCommand[] = []): Array<{ command: string; description: string }> {
+interface ResolvedPluginCommand {
+  command: string;
+  piCommand: string;
+  description: string;
+}
+
+function resolvePluginTelegramCommands(commands: readonly PiSessionCommand[]): ResolvedPluginCommand[] {
   const reserved = new Set(TELEGRAM_COMMAND_DEFINITIONS.flatMap((definition) => [definition.name, ...(definition.aliases ?? [])]));
   const seen = new Set<string>(reserved);
-  const result: Array<{ command: string; description: string }> = [];
+  const result: ResolvedPluginCommand[] = [];
   for (const command of commands) {
-    const name = command.name.toLowerCase();
-    if (command.source !== "extension" || !/^[a-z0-9_]{1,32}$/.test(name) || name.startsWith("telegram") || seen.has(name)) continue;
-    seen.add(name);
-    const description = (command.description || `Run ${name}`).replace(/[\r\n]+/g, " ").slice(0, 256);
-    result.push({ command: name, description });
+    const piCommand = command.name;
+    const name = piCommand.toLowerCase();
+    if (command.source !== "extension" || !/^[a-z0-9_-]{1,32}$/.test(name) || name.startsWith("telegram")) continue;
+    const telegramCommand = name.replace(/-/g, "_");
+    if (seen.has(telegramCommand)) continue;
+    seen.add(telegramCommand);
+    const description = (command.description || `Run ${piCommand}`).replace(/[\r\n]+/g, " ").slice(0, 256);
+    result.push({ command: telegramCommand, piCommand, description });
   }
   return result;
+}
+
+export function getPluginTelegramCommands(commands: readonly PiSessionCommand[] = []): Array<{ command: string; description: string }> {
+  return resolvePluginTelegramCommands(commands).map(({ command, description }) => ({ command, description }));
 }
 
 export function getTelegramCommandMenu(commands: readonly PiSessionCommand[] = []): Array<{ command: string; description: string }> {
@@ -60,8 +73,8 @@ export function getTelegramCommandMenu(commands: readonly PiSessionCommand[] = [
   return [...builtIns, ...getPluginTelegramCommands(commands)].slice(0, 100);
 }
 
-export function isPluginTelegramCommand(name: string, commands: readonly PiSessionCommand[] = []): boolean {
-  return getPluginTelegramCommands(commands).some((command) => command.command === name.toLowerCase());
+export function getPluginTelegramCommand(name: string, commands: readonly PiSessionCommand[] = []): ResolvedPluginCommand | undefined {
+  return resolvePluginTelegramCommands(commands).find((command) => command.command === name.toLowerCase());
 }
 
 export function telegramHelpText(commands: readonly PiSessionCommand[] = []): string {

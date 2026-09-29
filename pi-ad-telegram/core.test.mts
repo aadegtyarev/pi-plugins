@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AgentBoardPublisher, type AgentBoardTransport, BackgroundAgentBatch } from "./agent-board.ts";
-import { getPluginTelegramCommands, getTelegramCommandMenu, isPluginTelegramCommand, normalizeTelegramCommand, TELEGRAM_COMMAND_DEFINITIONS, telegramHelpText } from "./commands.ts";
+import { getPluginTelegramCommand, getPluginTelegramCommands, getTelegramCommandMenu, normalizeTelegramCommand, TELEGRAM_COMMAND_DEFINITIONS, telegramHelpText } from "./commands.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
 import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue } from "./queue.ts";
 import { renderTelegramMessage, sendTelegramMessage, type TelegramRequester } from "./message-renderer.ts";
@@ -363,18 +363,25 @@ test("plugin commands are exposed only when available in the Pi session", () => 
     { name: "cwd", description: "Show current directory", source: "extension" },
     { name: "workflow", description: "Run workflow", source: "extension" },
     { name: "feature", description: "Feature prompt", source: "prompt" },
-    { name: "invalid-name", description: "Invalid Telegram name", source: "extension" },
+    { name: "wt-create", description: "Create a worktree", source: "extension" },
+    { name: "invalid-name", description: "Pi command using a hyphen", source: "extension" },
     { name: "start", description: "Override built-in", source: "extension" },
     { name: "telegram-reload", description: "Internal command", source: "extension" },
   ];
   assert.deepEqual(getPluginTelegramCommands(commands), [
     { command: "cwd", description: "Show current directory" },
     { command: "workflow", description: "Run workflow" },
+    { command: "wt_create", description: "Create a worktree" },
+    { command: "invalid_name", description: "Pi command using a hyphen" },
   ]);
-  assert.ok(getTelegramCommandMenu(commands).some((command) => command.command === "cwd"));
-  assert.equal(isPluginTelegramCommand("cwd", commands), true);
-  assert.equal(isPluginTelegramCommand("cwd", []), false);
-  assert.ok(telegramHelpText(commands).includes("/cwd — Show current directory"));
+  assert.ok(getTelegramCommandMenu(commands).some((command) => command.command === "wt_create"));
+  assert.deepEqual(getPluginTelegramCommand("wt_create", commands), {
+    command: "wt_create",
+    piCommand: "wt-create",
+    description: "Create a worktree",
+  });
+  assert.equal(getPluginTelegramCommand("cwd", []), undefined);
+  assert.ok(telegramHelpText(commands).includes("/wt_create — Create a worktree"));
 });
 
 test("command menu, aliases, and help share one definition list", () => {
