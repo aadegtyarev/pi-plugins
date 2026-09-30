@@ -3,7 +3,9 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 export type Metric = { value: number | null; complete: boolean };
 export interface UsageTotals {
   prompt: Metric;
+  input: Metric;
   cached: Metric;
+  cacheWrite: Metric;
   uncached: Metric;
   output: Metric;
   total: Metric;
@@ -110,7 +112,9 @@ function totals(acc: Acc): UsageTotals {
   const cachedMetric = metric(acc, ["cacheRead"], acc.cacheRead);
   return {
     prompt: promptMetric,
+    input: metric(acc, ["input"], acc.input),
     cached: cachedMetric,
+    cacheWrite: metric(acc, ["cacheWrite"], acc.cacheWrite),
     uncached: metric(acc, ["input", "cacheWrite"], acc.input + acc.cacheWrite),
     output: metric(acc, ["output"], acc.output),
     total: metric(acc, [...promptFields, "output"], prompt + acc.output),

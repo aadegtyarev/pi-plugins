@@ -19,7 +19,7 @@ Settings are read at `session_start` from `<PI_CODING_AGENT_DIR>/pi-ad-telegram.
 
 | Key | Default | Meaning |
 |---|---:|---|
-| `queueCapacity` | `20` | Maximum pending Telegram tasks. |
+| `queueCapacity` | `20` | Maximum pending bridge-local tasks; does not limit Pi's internal steering queue. |
 | `longPollTimeoutSeconds` | `20` | Telegram long-poll timeout. |
 | `staleBacklogThresholdMs` | `30000` | Outage duration after which recovered messages are treated as stale. |
 | `messageChunkLimit` | `3500` | Internal target for message chunks. |

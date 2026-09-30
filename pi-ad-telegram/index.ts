@@ -7,7 +7,7 @@ import type { BackgroundWorkEvent } from "./background-adapters/types.ts";
 import { AgentBoardPublisher, BackgroundAgentBatch } from "./agent-board.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
 import { getPluginTelegramCommand, getTelegramCommandMenu, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
-import { finalizeQueueNotice, formatQueueListing, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue, type QueueTaskFinalState, type QueuedTelegramTask } from "./queue.ts";
+import { finalizeQueueNotice, formatQueueListing, parseQueueCancelId, TelegramTaskQueue, type QueueTaskFinalState, type QueuedTelegramTask } from "./queue.ts";
 import { editTelegramMessage, escapeHtml, sendTelegramMessage } from "./message-renderer.ts";
 import { TelegramOutbox } from "./outbox.ts";
 import { formatTelegramReplyContext } from "./reply-context.ts";
@@ -19,6 +19,7 @@ import { TelegramTypingIndicator } from "./typing-indicator.ts";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const TELEGRAM_UPDATE_PAGE_SIZE = 100; // Bot API getUpdates maximum result count.
+const SESSION_USAGE_REPORT_TYPE = "pi-ad-session-usage:report";
 interface TelegramUser {
   id: number;
   first_name?: string;
@@ -143,6 +144,10 @@ export default function (pi: ExtensionAPI) {
   const compactionActivity = new CompactionActivityLifecycle();
   let activeChatId: number | undefined;
   let lastTelegramChatId: number | undefined;
+  let sessionUsageReportChatId: number | undefined;
+  let pendingSessionUsageReportChatId: number | undefined;
+  let telegramRunChatId: number | undefined;
+  let pendingTelegramRunChatId: number | undefined;
   let activeBashChatId: number | undefined;
   let activeCompactChatId: number | undefined;
   let activeCompactActivityId: string | undefined;
@@ -280,6 +285,16 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  async function forwardSessionUsageReport(chatId: number, text: string, signal: AbortSignal): Promise<void> {
+    const token = botToken;
+    if (!token || signal.aborted) return;
+    try {
+      await sendTelegramMessage(telegramRequest, token, chatId, { text, format: "plain" }, signal, settings.messageChunkLimit);
+    } catch {
+      if (!signal.aborted) console.error("[pi-ad-telegram] Failed to forward the session-usage report.");
+    }
+  }
+
   async function sendQueuedTask(chatId: number, task: QueuedTelegramTask, signal: AbortSignal): Promise<void> {
     if (!botToken) return;
     const [messageId] = await sendTelegramMessage(telegramRequest, botToken, chatId, {
@@ -290,44 +305,30 @@ export default function (pi: ExtensionAPI) {
     task.noticeMessageId = messageId;
   }
 
-  async function deleteQueueNotice(task: QueuedTelegramTask, signal: AbortSignal): Promise<boolean> {
-    if (!botToken || task.noticeMessageId === undefined) return true;
+  async function markSteeringSubmission(chatId: number, messageId: number | undefined, signal: AbortSignal): Promise<void> {
+    if (!botToken || messageId === undefined || signal.aborted) return;
     try {
-      await deleteTelegramMessage(botToken, task.chatId, task.noticeMessageId, signal);
-      return true;
-    } catch (error) {
-      if (!signal.aborted) console.error("[pi-ad-telegram] Failed to remove queued-task notice:", error);
-      return false;
+      await telegramRequest<unknown>(botToken, "setMessageReaction", {
+        chat_id: chatId,
+        message_id: messageId,
+        reaction: [{ type: "emoji", emoji: "👀" }],
+        is_big: false,
+      }, signal);
+    } catch {
+      if (!signal.aborted) console.warn("[pi-ad-telegram] Failed to mark a submitted message.");
     }
   }
 
   async function closeQueuedTask(task: QueuedTelegramTask, state: QueueTaskFinalState, emoji: "✅" | "❌", signal: AbortSignal): Promise<void> {
-    if (!botToken) return;
+    if (!botToken || task.noticeMessageId === undefined) return;
     await finalizeQueueNotice({
       signal,
-      ...(task.replyToMessageId !== undefined ? {
-        react: () => telegramRequest<unknown>(botToken!, "setMessageReaction", {
-          chat_id: task.chatId,
-          message_id: task.replyToMessageId,
-          reaction: [{ type: "emoji", emoji: reactionForQueueTask(state) }],
-          is_big: false,
-        }, signal),
-      } : {}),
-      deleteNotice: () => deleteQueueNotice(task, signal),
-      editNotice: async () => {
-        if (task.noticeMessageId === undefined) return;
-        await editTelegramMessage(telegramRequest, botToken!, task.chatId, task.noticeMessageId, {
-          text: `${emoji} Task ${task.id} ${state}.`,
-          replyMarkup: { inline_keyboard: [] },
-        }, signal, settings.messageChunkLimit);
-      },
-      onError: (stage, error) => {
-        if (signal.aborted) return;
-        if (stage === "reaction" && error instanceof Error && error.message.includes("REACTION_INVALID")) {
-          console.warn("[pi-ad-telegram] Telegram rejected the queue reaction; falling back to editing the queue notice.");
-          return;
-        }
-        console.error(`[pi-ad-telegram] Failed to finalize queue task (${stage}):`, error);
+      editNotice: () => editTelegramMessage(telegramRequest, botToken!, task.chatId, task.noticeMessageId!, {
+        text: `${emoji} Task ${task.id} ${state}.`,
+        replyMarkup: { inline_keyboard: [] },
+      }, signal, settings.messageChunkLimit),
+      onError: () => {
+        if (!signal.aborted) console.error("[pi-ad-telegram] Failed to update queued-task status.");
       },
     });
   }
@@ -631,6 +632,10 @@ export default function (pi: ExtensionAPI) {
     }
     activeChatId = undefined;
     lastTelegramChatId = undefined;
+    sessionUsageReportChatId = undefined;
+    pendingSessionUsageReportChatId = undefined;
+    telegramRunChatId = undefined;
+    pendingTelegramRunChatId = undefined;
     activityWorking = false;
     currentThinking = "";
     currentThinkingEntry = undefined;
@@ -1015,7 +1020,19 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const taskText = `${text || (hasAttachments ? "Please inspect the attached file." : "Please respond to the message I replied to.")}${incomingAttachment}${replyContext}`;
-    if (!ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined || drainingQueue) {
+    if (!ctx.isIdle()) {
+      try {
+        pi.sendUserMessage(taskText, { expandPromptTemplates: true, deliverAs: "steer" });
+      } catch {
+        await reply(chatId, "Could not submit this message to Pi. Please try again.", signal);
+        return;
+      }
+      sessionUsageReportChatId = chatId;
+      telegramRunChatId = chatId;
+      void markSteeringSubmission(chatId, message.message_id, signal);
+      return;
+    }
+    if (activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined || drainingQueue) {
       const task = queuedTasks.enqueue(chatId, taskText, message.message_id);
       if (!task) {
         await reply(chatId, `Queue is full (maximum ${settings.queueCapacity} tasks). The task was not added; try again later or use /clear_queue.`, signal);
@@ -1030,6 +1047,10 @@ export default function (pi: ExtensionAPI) {
 
   async function dispatchTask(chatId: number, taskText: string, ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
     activeChatId = chatId;
+    sessionUsageReportChatId = chatId;
+    pendingSessionUsageReportChatId = chatId;
+    telegramRunChatId = chatId;
+    pendingTelegramRunChatId = chatId;
     typingIndicator.start(chatId, signal);
     activityWorking = true;
     currentThinking = "";
@@ -1045,6 +1066,10 @@ export default function (pi: ExtensionAPI) {
     } catch (error) {
       typingIndicator.stop();
       activeChatId = undefined;
+      if (sessionUsageReportChatId === chatId) sessionUsageReportChatId = undefined;
+      if (pendingSessionUsageReportChatId === chatId) pendingSessionUsageReportChatId = undefined;
+      if (telegramRunChatId === chatId) telegramRunChatId = undefined;
+      if (pendingTelegramRunChatId === chatId) pendingTelegramRunChatId = undefined;
       await reply(chatId, `Failed to send the task to Pi: ${String(error)}`, signal);
       void drainQueuedTasks();
     }
@@ -1202,6 +1227,10 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     await stopTelegram();
+    sessionUsageReportChatId = undefined;
+    pendingSessionUsageReportChatId = undefined;
+    telegramRunChatId = undefined;
+    pendingTelegramRunChatId = undefined;
     compactionActivity.reset();
     activeCompactChatId = undefined;
     activeCompactActivityId = undefined;
@@ -1433,7 +1462,27 @@ export default function (pi: ExtensionAPI) {
     finishCompactionActivity(id, chatId, "failed", `🧹 Context compaction failed${details}`, controller.signal);
   });
 
+  pi.on("agent_start", () => {
+    if (pendingSessionUsageReportChatId === undefined) sessionUsageReportChatId = undefined;
+    else sessionUsageReportChatId ??= pendingSessionUsageReportChatId;
+    pendingSessionUsageReportChatId = undefined;
+    if (pendingTelegramRunChatId === undefined) telegramRunChatId = undefined;
+    else telegramRunChatId ??= pendingTelegramRunChatId;
+    pendingTelegramRunChatId = undefined;
+  });
+
   pi.on("message_end", (event) => {
+    if (event.message.role === "custom" && event.message.customType === SESSION_USAGE_REPORT_TYPE) {
+      const chatId = sessionUsageReportChatId;
+      sessionUsageReportChatId = undefined;
+      pendingSessionUsageReportChatId = undefined;
+      if (chatId === undefined || !controller) return;
+      const text = typeof event.message.content === "string"
+        ? event.message.content
+        : event.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+      if (text.trim()) void forwardSessionUsageReport(chatId, text, controller.signal);
+      return;
+    }
     if (event.message.role !== "assistant") return;
     const text = assistantText(event.message);
     if (text) lastAssistantText = text;
@@ -1453,7 +1502,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_settled", async () => {
     typingIndicator.stop();
-    const chatId = activeChatId ?? lastTelegramChatId;
+    const activityTargetChatId = activeChatId;
+    const chatId = telegramRunChatId ?? activeChatId ?? lastTelegramChatId;
     if (chatId !== undefined && botToken && controller) {
       const text = lastAssistantText || "Pi completed the task without a text response.";
       const message = cancelRequested ? `Task stopped.\n\n${text}` : text;
@@ -1461,11 +1511,15 @@ export default function (pi: ExtensionAPI) {
       lastAssistantText = "";
       await activityQueue;
       await reply(chatId, message, controller.signal, true);
-      activityWorking = false;
-      await refreshActivity(chatId, controller.signal);
-      await deleteActivity(chatId, controller.signal);
+      if (activityTargetChatId !== undefined) {
+        activityWorking = false;
+        await refreshActivity(activityTargetChatId, controller.signal);
+        await deleteActivity(activityTargetChatId, controller.signal);
+      }
       activeChatId = undefined;
     }
+    telegramRunChatId = undefined;
+    pendingTelegramRunChatId = undefined;
     // Telegram tasks can also be waiting behind work started from the TUI/API.
     void drainQueuedTasks();
   });
@@ -1475,6 +1529,10 @@ export default function (pi: ExtensionAPI) {
     agentBoardRefreshTimer = undefined;
     const activityChat = activityChatId;
     await stopTelegram();
+    sessionUsageReportChatId = undefined;
+    pendingSessionUsageReportChatId = undefined;
+    telegramRunChatId = undefined;
+    pendingTelegramRunChatId = undefined;
     bashController?.abort();
     await activityQueue;
     if (activityChat !== undefined && botToken) await deleteActivity(activityChat, AbortSignal.timeout(settings.shutdownCleanupTimeoutMs));

@@ -9,6 +9,9 @@ const usage = (input: number, output: number, cacheRead: number, cacheWrite: num
 test("active branch metrics match /status prompt and cache-hit semantics", () => {
   const report = collectUsage([assistant("p", usage(8345, 1234, 4000, 0, 0.045))]);
   assert.deepEqual(report.parent.prompt, { value: 12345, complete: true });
+  assert.deepEqual(report.parent.input, { value: 8345, complete: true });
+  assert.deepEqual(report.parent.cached, { value: 4000, complete: true });
+  assert.deepEqual(report.parent.cacheWrite, { value: 0, complete: true });
   assert.deepEqual(report.parent.uncached, { value: 8345, complete: true });
   assert.equal(report.parent.total.value, 13579);
   assert.equal(report.parent.cacheHitRate, 4000 / 12345 * 100);

@@ -2,9 +2,11 @@
 
 ## Queue behavior
 
-Ordinary messages received while Pi is busy enter a per-chat FIFO queue. The default capacity is 20 pending tasks and can be changed with `queueCapacity`. Each task is acknowledged with its ID and can be removed with `/queue_cancel <ID>`; `/clear_queue` removes all pending tasks for that chat. The active task is not cancelled by clearing the queue. When the queue is full, the bot rejects the new item explicitly.
+Ordinary text and attachments received while Pi is running are submitted directly to Pi with `deliverAs: "steer"`. The bridge best-effort adds 👀 to the source message after submission. This only indicates that the bridge called Pi's submission API; it does not confirm queue acceptance or processing, and the bridge cannot mark when that exact item starts. Pi-steered messages are not listed by `/queue` and cannot be individually removed with `/queue_cancel` or `/clear_queue`.
 
-Queued tasks start one at a time after the current Pi, Bash, compaction, or new-session operation settles. The bot marks the original Telegram message with ✅ when its task starts and ❌ when cancelled. If Telegram rejects reactions, it edits the queue acknowledgement instead.
+The per-chat FIFO queue is reserved for work that remains bridge-managed, including eligible extension slash commands, stale/offline batches while Pi is busy, and ordinary input received during bridge-only operations. When Pi is idle, a stale/offline batch is dispatched normally with its explicit relevance warning. Its default capacity is 20 pending tasks and can be changed with `queueCapacity`. Each local task is acknowledged with its ID and can be removed with `/queue_cancel <ID>`; `/clear_queue` removes all pending local tasks for that chat. The active task is not cancelled by clearing the queue. When the local queue is full, the bot rejects a new local item explicitly.
+
+Local queued tasks start one at a time after the current Pi, Bash, compaction, or new-session operation settles. The bot edits the queue acknowledgement to show ✅ when a local task starts or ❌ when cancelled, and removes its inline cancel button. It does not add 👍/👎 reactions to the source message.
 
 ## Offline and stale messages
 

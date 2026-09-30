@@ -3,12 +3,6 @@ import { DEFAULT_TELEGRAM_SETTINGS } from "./config.ts";
 export const MAX_QUEUED_TASKS = DEFAULT_TELEGRAM_SETTINGS.queueCapacity;
 
 export type QueueTaskFinalState = "picked up" | "cancelled";
-export type QueueTaskReaction = "👍" | "👎";
-
-/** Telegram Bot API accepts these emoji as standard reactions (unlike the visual ✅/❌ status icons). */
-export function reactionForQueueTask(state: QueueTaskFinalState): QueueTaskReaction {
-  return state === "picked up" ? "👍" : "👎";
-}
 
 export interface QueuedTelegramTask {
   id: string;
@@ -84,31 +78,16 @@ export function parseQueueCancelId(args: string): string | undefined {
 
 export interface QueueNoticeFinalizer {
   signal: AbortSignal;
-  react?: () => Promise<unknown>;
-  deleteNotice: () => Promise<boolean>;
   editNotice: () => Promise<void>;
-  onError?: (stage: "reaction" | "notice deletion", error: unknown) => void;
+  onError?: (error: unknown) => void;
 }
 
-/** React to the source message, then delete the notice; if either fails, leave an inert status notice. */
-export async function finalizeQueueNotice({ signal, react, deleteNotice, editNotice, onError }: QueueNoticeFinalizer): Promise<void> {
+/** Keep the queue outcome in the bot's acknowledgement instead of reacting to the user's message. */
+export async function finalizeQueueNotice({ signal, editNotice, onError }: QueueNoticeFinalizer): Promise<void> {
   if (signal.aborted) return;
-  if (react) {
-    let reactionSucceeded = false;
-    try {
-      await react();
-      reactionSucceeded = true;
-    } catch (error) {
-      onError?.("reaction", error);
-    }
-    if (reactionSucceeded) {
-      try {
-        if (await deleteNotice()) return;
-      } catch (error) {
-        onError?.("notice deletion", error);
-      }
-      if (signal.aborted) return;
-    }
+  try {
+    await editNotice();
+  } catch (error) {
+    onError?.(error);
   }
-  if (!signal.aborted) await editNotice();
 }
