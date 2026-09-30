@@ -1,11 +1,36 @@
 # Pi plugins
 
-A collection of extensions for Pi. Each extension lives in its own subdirectory.
+Three first-party Pi extensions, distributed together as a Git package: a Telegram bridge, session-usage reporting, and event hooks.
 
-- `pi-ad-telegram/` — Telegram bridge extension.
-- `pi-ad-session-usage/` — active-branch usage and estimated-cost reporting extension.
-- `pi-ad-hooks/` — user-global prompt and asynchronous side-effect hooks for public Pi events.
-- `web/` — public web search and page-fetch tools.
-- `pi-subagents` is installed as a user-level Pi package (`pi install npm:pi-subagents`). Its documentation and updates are available through `pi-subagents`.
+## Install
 
-To develop `pi-ad-telegram`, install dependencies with `npm install`; run checks with `npm run typecheck` and `npm test`. Project instructions for Pi agents, including the subagent acceptance contract, are in [`AGENTS.md`](AGENTS.md).
+The repository is private. Make sure GitHub access is configured, then run:
+
+```sh
+pi install git:github.com/aadegtyarev/pi-plugins
+```
+
+The package exposes all three extensions. If any are already loaded from standalone files or symlinks, resolve that duplicate before installing the package. Do not remove an existing extension path until you have confirmed what it points to.
+
+Extensions run with the permissions of the Pi process. Review the source and the security notes for the extensions you enable. Telegram also requires a bot token and an explicit startup opt-in.
+
+## Extensions
+
+| Extension | What it does | Read next |
+|---|---|---|
+| `pi-ad-telegram` | Connects one Pi session to a private Telegram bot. | [Setup](pi-ad-telegram/README.md), [commands](pi-ad-telegram/commands.md), [settings](pi-ad-telegram/configuration.md), [delivery behavior](pi-ad-telegram/operations.md) |
+| `pi-ad-session-usage` | Reports active-branch token usage and Pi-estimated cost. | [README](pi-ad-session-usage/README.md), [surface contract](docs/contracts/surfaces/session-usage-reporting.md) |
+| `pi-ad-hooks` | Adds advisory prompt context or runs trusted local scripts on public Pi events. | [Setup](pi-ad-hooks/README.md), [configuration and event reference](pi-ad-hooks/reference.md) |
+
+## Development
+
+Node.js and npm are needed for repository checks. From the repository root:
+
+```sh
+npm install
+npm test
+npm run typecheck
+npm run docs:check
+```
+
+See [`AGENTS.md`](AGENTS.md) for project workflow and contract requirements. The [`docs/contracts/surfaces/`](docs/contracts/surfaces/) pages define the current behavior and limits of each extension.

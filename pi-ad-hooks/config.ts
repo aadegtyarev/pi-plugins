@@ -5,7 +5,7 @@ export const EVENTS = [
   "project_trust", "resources_discover", "session_start", "session_info_changed", "session_before_switch", "session_before_fork", "session_before_compact", "session_compact", "session_compact_failed", "session_shutdown", "mcp_servers_change", "session_before_tree", "session_tree", "context", "context_with_system", "cache_warming_decision", "before_provider_request", "before_provider_headers", "after_provider_response", "provider_stream_event", "before_agent_start", "agent_start", "agent_end", "agent_before_settle", "agent_settled", "ui_prompt_start", "ui_prompt_end", "turn_start", "turn_end", "message_start", "message_update", "message_end", "tool_execution_start", "tool_execution_update", "tool_execution_end", "model_select", "thinking_level_select", "tool_call", "tool_result", "user_bash", "input",
 ] as const;
 export type HookEvent = typeof EVENTS[number];
-export type Hook = { id: string; type: "prompt"; text: string } | { id: string; type: "script"; script: string; timeoutMs: number };
+export type Hook = { id: string; type: "prompt"; text: string } | { id: string; type: "system_prompt"; text: string } | { id: string; type: "script"; script: string; timeoutMs: number };
 export type HookConfig = Partial<Record<HookEvent, Hook[]>>;
 export type Diagnostic = (hookId: string, event: string, code: string, safeMetadata?: Record<string, number | string>) => void;
 const MAX_TIMEOUT_MS = 30_000;
@@ -37,6 +37,13 @@ export function loadConfig(agentDir: string, diagnostic: Diagnostic = () => {}):
       ids.add(id);
       if (value.type === "prompt" && typeof value.text === "string" && value.text.length > 0 && Object.keys(value).every(key => ["id", "type", "text"].includes(key))) {
         valid.push({ id, type: "prompt", text: value.text }); continue;
+      }
+      if (value.type === "system_prompt") {
+        if (event !== "before_agent_start") { diagnostic(id, event, "SYSTEM_PROMPT_EVENT_INVALID"); continue; }
+        if (typeof value.text === "string" && value.text.length > 0 && Object.keys(value).every(key => ["id", "type", "text"].includes(key))) {
+          valid.push({ id, type: "system_prompt", text: value.text }); continue;
+        }
+        diagnostic(id, event, "HOOK_ENTRY_INVALID"); continue;
       }
       if (value.type === "script" && typeof value.script === "string" && Object.keys(value).every(key => ["id", "type", "script", "timeoutMs"].includes(key))) {
         const rel = value.script;
