@@ -20,6 +20,14 @@ export default function (pi: ExtensionAPI): void {
         prompts.stage(hook.id, hook.text);
         continue;
       }
+      if (hook.type === "system_prompt") {
+        if (name !== "before_agent_start") { report(hook.id, name, "SYSTEM_PROMPT_EVENT_INVALID"); continue; }
+        const options = (payload as { systemPromptOptions?: { appendSystemPrompt?: string } } | null)?.systemPromptOptions;
+        if (!options || typeof options !== "object") { report(hook.id, name, "SYSTEM_PROMPT_OPTIONS_MISSING"); continue; }
+        const existing = typeof options.appendSystemPrompt === "string" ? options.appendSystemPrompt : "";
+        options.appendSystemPrompt = existing ? `${existing}\n\n${hook.text}` : hook.text;
+        continue;
+      }
       // Queue jobs in registration order without joining their completion to the Pi handler.
       const prior = queues.get(name) ?? Promise.resolve();
       const next = prior.then(() => runScript({ script: hook.script, hooksDir: path.join(agentDir, "pi-ad-hooks"), agentDir, timeoutMs: hook.timeoutMs, id: hook.id, event: name, payload, diagnostic: report }));

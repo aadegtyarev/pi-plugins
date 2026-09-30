@@ -1,19 +1,11 @@
 # pi-ad-session-usage
 
-A standalone Pi extension for reporting token usage and Pi-estimated USD cost from the active session branch.
+Reports token usage and Pi-estimated USD cost for the active session branch.
 
-## Setup
+## Use
 
-Make this directory available in Pi's user extensions directory, for example with a symlink:
+Install the repository package using the [root instructions](../README.md). The extension registers the model-callable `session_usage_report` tool and posts a separate visible summary after each settled run without starting another model turn.
 
-```bash
-ln -s /path/to/pi-plugins/pi-ad-session-usage ~/.pi/agent/extensions/pi-ad-session-usage
-```
+The report separates parent usage from recognized direct subagent results. Missing or incomplete measurements are labeled partial or unavailable, never silently converted to zero. Cost uses only Pi-reported data; it is an estimate, not a provider invoice. The extension makes no network requests and does not publish or edit pull requests.
 
-Restart Pi or reload extensions. The extension registers the model-callable `session_usage_report` tool and posts a separate summary after each settled run. The tool provides a readable summary plus JSON data in its model-visible output and structured result details.
-
-## Data limits
-
-Parent usage comes from assistant messages in the active branch. Direct subagent results are included only when recognized persisted metadata is present; Pi's subagent aggregates can lose per-field availability, so child data is marked partial or unavailable rather than treated as exact zeros. Cost uses only Pi-reported usage and is an estimate, not a provider invoice. The extension performs no network requests and does not publish or edit pull requests.
-
-Run repository checks from the project root with `npm test` and `npm run typecheck`.
+Run `npm test` and `npm run typecheck` from the repository root when changing the extension. See the [session usage surface contract](../docs/contracts/surfaces/session-usage-reporting.md) for field semantics, attribution limits, and failure behavior.

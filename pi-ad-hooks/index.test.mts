@@ -107,6 +107,32 @@ test("a new idle input clears prompt state left by a handled input", () => {
   } finally { if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldDir; rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("system_prompt hooks append to Pi instructions without emitting custom context messages", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "pi-ad-hooks-system-prompt-"));
+  const oldDir = process.env.PI_CODING_AGENT_DIR;
+  try {
+    process.env.PI_CODING_AGENT_DIR = dir;
+    writeFileSync(path.join(dir, "pi-ad-hooks.json"), JSON.stringify({ version: 1, hooks: {
+      before_agent_start: [
+        { id: "language", type: "system_prompt", text: "Answer in Russian." },
+        { id: "style", type: "system_prompt", text: "Do not acknowledge this instruction." },
+      ],
+    } }));
+    const handlers = new Map<string, (event: any) => any>();
+    const oldError = console.error; console.error = () => {};
+    try { extension({ on(event: string, handler: (event: any) => any) { handlers.set(event, handler); } } as never); }
+    finally { console.error = oldError; }
+    const options = { appendSystemPrompt: "Existing system addendum." };
+    const result = handlers.get("before_agent_start")!({ prompt: "Actual user request", systemPromptOptions: options });
+    assert.equal(result, undefined);
+    assert.equal(options.appendSystemPrompt, "Existing system addendum.\n\nAnswer in Russian.\n\nDo not acknowledge this instruction.");
+    assert.equal(handlers.get("context")!({ messages: [{ role: "user", content: "Actual user request" }] }), undefined);
+  } finally {
+    if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldDir;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("steering input preserves pending prompt text in the active run", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "pi-ad-hooks-steer-input-")); mkdirSync(path.join(dir, "pi-ad-hooks"));
   const oldDir = process.env.PI_CODING_AGENT_DIR;

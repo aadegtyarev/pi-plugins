@@ -23,6 +23,20 @@ test("config accepts exact events, ordered hooks and default timeout", () => {
     assert.equal(EVENTS.length, 41);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+test("system_prompt hooks are accepted only on before_agent_start", () => {
+  const dir = fixture(); const diagnostics: string[] = [];
+  try {
+    writeFileSync(path.join(dir, "pi-ad-hooks.json"), JSON.stringify({ version: 1, hooks: {
+      before_agent_start: [{ id: "system-rule", type: "system_prompt", text: "Use Russian." }],
+      context: [{ id: "wrong-event", type: "system_prompt", text: "Do not enable here." }],
+    } }));
+    const config = loadConfig(dir, (_id, event, code) => diagnostics.push(`${event}:${code}`));
+    assert.deepEqual(config.before_agent_start, [{ id: "system-rule", type: "system_prompt", text: "Use Russian." }]);
+    assert.deepEqual(config.context, []);
+    assert.deepEqual(diagnostics, ["context:SYSTEM_PROMPT_EVENT_INVALID"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("invalid config entries are disabled with safe diagnostics and paths confined", () => {
   const dir = fixture(); const outside = path.join(dir, "outside.mjs"); writeFileSync(outside, "");
   const logs: string[] = [];

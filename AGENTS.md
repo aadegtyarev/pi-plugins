@@ -5,15 +5,17 @@
 - Add meaningful regression tests for behavioral changes.
 - `npm test`
 - `npm run typecheck`
+- `npm run docs:check`
 - `git diff --check`
 
 ## Project structure
 
-- `pi-ad-telegram/` contains the Telegram bridge extension; `index.ts` is its entry point and `background-adapters/` contains provider-specific lifecycle adapters.
-- Root `package.json` defines the extension's test and typecheck commands.
+- `pi-ad-telegram/`, `pi-ad-session-usage/`, and `pi-ad-hooks/` are the first-party extensions; their entry points are declared in the root Pi package manifest.
+- `.agents/skills/repo-docs/` contains the project documentation skill and its checker.
+- Root `package.json` defines the extension tests, typecheck, and documentation checks.
 
 ## Extension naming and Git workflow
-- Name each first-party Pi extension directory `pi-ad-<name>`; keep installation aliases and extension-owned configuration/script paths consistent with that prefix.
+- Name each first-party Pi extension directory `pi-ad-<name>`; keep extension-owned configuration/script paths consistent with that prefix. Distribute extensions through the root `pi-plugins` package manifest; do not add a parallel bundled copy to another repository.
 - Make repository changes on a topic branch and deliver them through a pull request. Do not commit or push directly to the default branch. Run the repository checks and obtain a read-only review before merging through the PR.
 
 <!-- BEGIN ad-pi-addons contract workflow -->
