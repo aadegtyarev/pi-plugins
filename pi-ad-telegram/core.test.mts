@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { AgentBoardPublisher, type AgentBoardTransport, BackgroundAgentBatch } from "./agent-board.ts";
 import { getPluginTelegramCommand, getPluginTelegramCommands, getTelegramCommandMenu, normalizeTelegramCommand, TELEGRAM_COMMAND_DEFINITIONS, telegramHelpText } from "./commands.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
-import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue } from "./queue.ts";
+import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, TelegramTaskQueue } from "./queue.ts";
 import { renderTelegramMessage, renderTelegramMessageParts, sendTelegramMessage, type TelegramRequester } from "./message-renderer.ts";
 import telegramExtension from "./index.ts";
 import { formatTelegramReplyContext } from "./reply-context.ts";
@@ -96,42 +99,32 @@ test("agent board groups concurrent agents and starts a fresh batch after all fi
   assert.deepEqual(batches.all().map((entry) => entry.id), ["d"]);
 });
 
-test("failed notice deletion leaves an inert final status after a successful reaction", async () => {
+test("queue finalization edits its acknowledgment without reacting to the source message", async () => {
   const calls: string[] = [];
   await finalizeQueueNotice({
     signal: new AbortController().signal,
-    react: async () => { calls.push("react"); },
-    deleteNotice: async () => { calls.push("delete"); return false; },
     editNotice: async () => { calls.push("edit"); },
   });
-  assert.deepEqual(calls, ["react", "delete", "edit"]);
+  assert.deepEqual(calls, ["edit"]);
 });
 
-test("REACTION_INVALID falls back to editing the notice", async () => {
-  const calls: string[] = [];
+test("aborted queue finalization leaves the acknowledgment untouched", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let edited = false;
+  await finalizeQueueNotice({ signal: controller.signal, editNotice: async () => { edited = true; } });
+  assert.equal(edited, false);
+});
+
+test("queue finalization catches status-edit failures", async () => {
+  let error: unknown;
   await finalizeQueueNotice({
     signal: new AbortController().signal,
-    react: async () => { calls.push("react"); throw Object.assign(new Error("Bad Request: REACTION_INVALID"), { status: 400 }); },
-    deleteNotice: async () => { calls.push("delete"); return true; },
-    editNotice: async () => { calls.push("edit"); },
+    editNotice: async () => { throw new Error("edit failed"); },
+    onError: (failure) => { error = failure; },
   });
-  assert.deepEqual(calls, ["react", "edit"]);
-});
-
-test("queue task reactions use Telegram-supported emojis", () => {
-  assert.equal(reactionForQueueTask("picked up"), "👍");
-  assert.equal(reactionForQueueTask("cancelled"), "👎");
-});
-
-test("successful reaction and notice deletion do not edit a completed notice", async () => {
-  const calls: string[] = [];
-  await finalizeQueueNotice({
-    signal: new AbortController().signal,
-    react: async () => { calls.push("react"); },
-    deleteNotice: async () => { calls.push("delete"); return true; },
-    editNotice: async () => { calls.push("edit"); },
-  });
-  assert.deepEqual(calls, ["react", "delete"]);
+  assert.ok(error instanceof Error);
+  assert.equal(error.message, "edit failed");
 });
 
 test("queue preserves FIFO and scopes cancellation and clearing by chat", () => {
@@ -194,13 +187,16 @@ test("Telegram polling covers busy and successful session-command paths with the
   const previousToken = process.env.PI_TELEGRAM_BOT_TOKEN;
   const previousAllowedIds = process.env.PI_TELEGRAM_ALLOWED_USER_IDS;
   const previousEnabled = process.env.PI_TELEGRAM_ENABLED;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousFetch = globalThis.fetch;
   const previousWarn = console.warn;
+  const testCwd = await mkdtemp(join(tmpdir(), "pi-ad-telegram-core-"));
   const warnings: string[] = [];
   console.warn = (...args) => { warnings.push(args.map(String).join(" ")); };
   process.env.PI_TELEGRAM_BOT_TOKEN = "test-token";
-  process.env.PI_TELEGRAM_ALLOWED_USER_IDS = "7";
+  process.env.PI_TELEGRAM_ALLOWED_USER_IDS = "7,8";
   process.env.PI_TELEGRAM_ENABLED = "1";
+  process.env.PI_CODING_AGENT_DIR = testCwd;
 
   const updates = [
     { text: "/status", idle: false },
@@ -214,14 +210,19 @@ test("Telegram polling covers busy and successful session-command paths with the
     { text: "/reload", idle: false },
     { text: "/bash echo busy", idle: false },
     { text: "active Telegram task", idle: true },
+    { text: "busy Telegram prompt", idle: false, chatId: 84, userId: 8 },
+    { text: "inspect this attachment", idle: false, attachment: true, chatId: 84, userId: 8 },
     { text: "/cancel", idle: false },
     { text: "/reload", idle: true },
     { text: "/bash printf success", idle: true },
     { text: "/new", idle: true },
   ];
   const sent: string[] = [];
+  const sentChats: Array<{ text: string; chatId: number }> = [];
   const edited: string[] = [];
   const userMessages: string[] = [];
+  const userMessageOptions: Array<Record<string, unknown> | undefined> = [];
+  const reactions: Array<Record<string, unknown>> = [];
   const bashCommands: string[] = [];
   let nextUpdate = 0;
   let sessionIdle = false;
@@ -247,6 +248,7 @@ test("Telegram polling covers busy and successful session-command paths with the
     const url = new URL(String(input));
     const method = url.pathname.split("/").at(-1);
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    if (url.pathname.startsWith("/file/")) return new Response("attachment bytes", { status: 200 });
     if (method === "getUpdates") getUpdatesOffsets.push(Number(body.offset));
     let result: unknown;
     if (method === "getUpdates" && body.offset === 0 && body.timeout === 0) {
@@ -274,7 +276,13 @@ test("Telegram polling covers busy and successful session-command paths with the
       sessionIdle = update.idle;
       result = [{
         update_id: nextUpdate + 1,
-        message: { message_id: nextUpdate + 1, from: { id: 7 }, chat: { id: 42, type: "private" }, text: update.text },
+        message: {
+          message_id: nextUpdate + 1,
+          from: { id: update.userId ?? 7 },
+          chat: { id: update.chatId ?? 42, type: "private" },
+          text: update.text,
+          ...(update.attachment ? { document: { file_id: "test-file", file_name: "notes.txt" } } : {}),
+        },
       }];
       nextUpdate++;
     } else if (method === "getUpdates" && startupCount > 1 && !replacementUpdateDelivered) {
@@ -286,8 +294,15 @@ test("Telegram polling covers busy and successful session-command paths with the
         if (signal?.aborted) reject(signal.reason);
         else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
       });
+    } else if (method === "getFile") {
+      result = { file_path: "documents/notes.txt" };
+    } else if (method === "setMessageReaction") {
+      if (body.message_id === 12) throw new Error("simulated reaction failure");
+      reactions.push(body);
+      result = true;
     } else if (method === "sendMessage") {
       sent.push(String(body.text));
+      sentChats.push({ text: String(body.text), chatId: Number(body.chat_id) });
       result = { message_id: ++nextMessageId };
     } else if (method === "editMessageText") {
       edited.push(String(body.text));
@@ -321,14 +336,18 @@ test("Telegram polling covers busy and successful session-command paths with the
     getCommands: () => [],
     setThinkingLevel: (effort: string) => { currentEffort = effort; },
     setModel: async (model: typeof availableModel) => { selectedModel = `${model.provider}/${model.id}`; return true; },
-    sendUserMessage: (text: string) => { userMessages.push(text); },
+    sendUserMessage: (text: string, options?: Record<string, unknown>) => {
+      userMessages.push(text);
+      userMessageOptions.push(options);
+      if (text === "active Telegram task") void events.get("agent_start")?.({});
+    },
     exec: async (_command: string, args: string[]) => {
       bashCommands.push(args.join(" "));
       return { code: 0, killed: false, stdout: "bash output", stderr: "" };
     },
   } as unknown as ExtensionAPI;
   const ctx = {
-    cwd: process.cwd(),
+    cwd: testCwd,
     model: { ...availableModel },
     modelRegistry: { getAvailable: () => [availableModel] },
     isIdle: () => sessionIdle,
@@ -388,7 +407,33 @@ test("Telegram polling covers busy and successful session-command paths with the
     assert.equal(currentEffort, "high");
     assert.equal(compactInstructions, "summarize briefly");
     assert.deepEqual(bashCommands, ["-lc printf success"]);
-    assert.deepEqual(userMessages, ["active Telegram task", "/telegram-reload", "/telegram-new"]);
+    const reactionDeadline = Date.now() + 1000;
+    while ((!reactions.some((body) => body.message_id === 12) || !warnings.some((warning) => warning.includes("Failed to mark a submitted message."))) && Date.now() < reactionDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(userMessages[0], "active Telegram task");
+    assert.equal(userMessages[1], "busy Telegram prompt");
+    assert.match(userMessages[2] ?? "", /inspect this attachment\n\nUser attached file: .*\.telegram-inbox\/.*notes\.txt\. Inspect it as needed\./);
+    assert.deepEqual(userMessages.slice(3), ["/telegram-reload", "/telegram-new"]);
+    assert.equal(userMessageOptions[1]?.deliverAs, "steer");
+    assert.equal(userMessageOptions[2]?.deliverAs, "steer");
+    assert.ok(reactions.some((body) => body.chat_id === 84 && body.message_id === 13 && Array.isArray(body.reaction) && (body.reaction[0] as { emoji?: string }).emoji === "👀"));
+    assert.ok(sentChats.some((message) => message.chatId === 84 && message.text.includes("Pi completed the task without a text response.")), `final response follows the latest ordinary Telegram input chat: ${JSON.stringify(sentChats)}`);
+    assert.ok(warnings.some((warning) => warning.includes("Failed to mark a submitted message.")), "reaction failures are best-effort");
+    assert.ok(reactions.every((body) => Array.isArray(body.reaction) && (body.reaction[0] as { emoji?: string }).emoji === "👀"), "queue status never uses thumbs-up/down reactions");
+    const customReport = { role: "custom", customType: "pi-ad-session-usage:report", content: "compact usage report", details: { private: "structured details" }, display: true, timestamp: Date.now() };
+    await events.get("message_end")?.({ message: { ...customReport, customType: "unrelated:message" } }, ctx);
+    await events.get("message_end")?.({ message: customReport }, ctx);
+    await events.get("message_end")?.({ message: customReport }, ctx);
+    const relayDeadline = Date.now() + 1000;
+    while (!sent.includes("compact usage report") && Date.now() < relayDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(sent.filter((text) => text === "compact usage report").length, 1);
+    assert.ok(sentChats.some((message) => message.chatId === 84 && message.text === "compact usage report"), "usage report follows the latest ordinary Telegram input chat");
+    assert.ok(sent.every((text) => !text.includes("structured details")), "structured report details are never forwarded");
+    await events.get("agent_start")?.({}, ctx);
+    await events.get("message_end")?.({ message: { ...customReport, content: "TUI-only usage report" } }, ctx);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(sent.includes("TUI-only usage report"), false, "TUI-only reports are not sent to a remembered Telegram chat");
     assert.equal(abortCount, 1);
     assert.ok(typingActionCount >= 1);
     assert.equal(typingStoppedBeforeAbort, true);
@@ -419,6 +464,9 @@ test("Telegram polling covers busy and successful session-command paths with the
     else process.env.PI_TELEGRAM_ALLOWED_USER_IDS = previousAllowedIds;
     if (previousEnabled === undefined) delete process.env.PI_TELEGRAM_ENABLED;
     else process.env.PI_TELEGRAM_ENABLED = previousEnabled;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(testCwd, { recursive: true, force: true });
   }
 });
 

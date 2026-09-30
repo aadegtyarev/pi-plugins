@@ -8,11 +8,14 @@ The bridge is opt-in: start Pi with `--telegram` or `PI_TELEGRAM_ENABLED=1`, or 
 
 ## Observable inputs and flows
 
-- Ordinary Telegram text is sent to the active Pi session. While Pi or an associated operation is busy, tasks enter a per-chat FIFO queue. Its default capacity is 20 pending tasks; tasks can be inspected, cancelled, or cleared without cancelling the active task.
+- Ordinary Telegram text and attachments received while Pi is running are submitted to Pi with `deliverAs: "steer"`. The bridge best-effort marks the source message 👀 after submission; that marker is not confirmation of acceptance or processing. There is no per-message processing reaction, and queue states never use 👍/👎. Pi-steered items are not listed or individually cancellable through bridge queue commands.
+- When ordinary task input from multiple allowed chats enters one Pi run, its final assistant response and usage report go to the chat of the latest such message. Bridge commands alone do not change that target; the activity bubble remains associated with the chat where the Telegram task began.
+- A bridge-local per-chat FIFO queue remains for eligible extension slash commands, stale/offline batches while Pi is busy, and ordinary input during bridge-only operations. When Pi is idle, stale batches are dispatched normally with an explicit relevance warning. The local queue's default capacity is 20 pending tasks; `/queue`, `/queue_cancel`, and `/clear_queue` apply only to that queue. Local queue outcomes edit the bot's acknowledgement rather than reacting to the source message.
 - Built-in bot commands and eligible commands from loaded Pi extensions are forwarded to their handlers. Unknown slash commands are rejected rather than sent as ordinary prompts.
 - Documents and photos are downloaded into `.telegram-inbox/` in the active project. A reply or quote includes the original text/caption, sender, and quoted text as delimited context. If original content is unavailable, that is stated. The extension does not fetch arbitrary Telegram history.
 - Messages accumulated while Pi is offline are grouped by chat and presented as one explicitly stale batch. Messages accumulated during a network outage of at least 30 seconds are handled the same way after reconnection. Pi asks whether ordinary stale requests remain relevant before acting; stale slash commands are filtered and never replayed.
-- While a Telegram-originated task is active, the bot refreshes Telegram's typing action; queued tasks do not show typing. Failures are best-effort and do not block Pi.
+- For Telegram-associated work, the bridge forwards the text of the `pi-ad-session-usage:report` custom message once as a separate Telegram message. TUI-only reports, structured details, unrelated custom messages, and duplicate assistant responses are not forwarded.
+- While a Telegram-originated task is active, the bot refreshes Telegram's typing action; bridge-local queued tasks do not show typing. Failures are best-effort and do not block Pi.
 - The existing activity bubble ends with a local-time-only `Updated: HH:mm` footer. Automatic and `/compact` compaction transition one activity row and do not create separate lifecycle chat messages. Validation/refusal text from `/compact` remains an ordinary command response.
 - Background work is integrated through adapters. It does not hold the input lock after the parent turn settles. A shared, edited-in-place board shows each agent's effective model when available, short task summary, running/terminal state, elapsed time, and reported token usage. It never displays the full task prompt. Running token counts are provisional; unavailable usage is labeled. Completed rows remain as recent history. `/agents` refreshes the board.
 
@@ -22,7 +25,7 @@ Credentials remain outside the settings file. Operator settings load at `session
 
 | Setting | Default | Purpose |
 |---|---:|---|
-| `queueCapacity` | 20 | Maximum pending Telegram tasks |
+| `queueCapacity` | 20 | Maximum pending bridge-local tasks; does not limit Pi's steering queue |
 | `longPollTimeoutSeconds` | 20 | Long-poll timeout |
 | `staleBacklogThresholdMs` | 30000 | Outage threshold for stale handling |
 | `messageChunkLimit` | 3500 | Internal target for text/HTML chunks |
