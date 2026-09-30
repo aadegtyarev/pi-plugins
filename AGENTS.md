@@ -12,6 +12,10 @@
 - `pi-ad-telegram/` contains the Telegram bridge extension; `index.ts` is its entry point and `background-adapters/` contains provider-specific lifecycle adapters.
 - Root `package.json` defines the extension's test and typecheck commands.
 
+## Extension naming and Git workflow
+- Name each first-party Pi extension directory `pi-ad-<name>`; keep installation aliases and extension-owned configuration/script paths consistent with that prefix.
+- Make repository changes on a topic branch and deliver them through a pull request. Do not commit or push directly to the default branch. Run the repository checks and obtain a read-only review before merging through the PR.
+
 <!-- BEGIN ad-pi-addons contract workflow -->
 ## Contracts and feature work
 - Read `docs/contracts/meta-contract.md` before implementing or reviewing a feature.

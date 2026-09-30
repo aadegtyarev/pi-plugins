@@ -2,7 +2,7 @@
 
 ## Boundary, consumers, and ownership
 
-This contract governs executable Pi extensions maintained in this repository, currently centered on `pi-ad-telegram/`. It defines repository-level requirements for maintainers and delegated implementers. It is not a general contract for Pi skills, prompt templates, themes, MCP servers, or every package type.
+This contract governs executable Pi extensions maintained in this repository, including `pi-ad-telegram/`, `pi-ad-session-usage/`, and `pi-ad-hooks/`. First-party extension directories use the `pi-ad-<name>` convention. Keep installation aliases and extension-owned configuration/script paths aligned with that name. This contract defines repository-level requirements for maintainers and delegated implementers; it is not a general contract for Pi skills, prompt templates, themes, MCP servers, or every package type.
 
 An extension's `index.ts` is its Pi-facing entry point and composition root. It connects Pi lifecycle and public APIs to cohesive feature modules; it should not become the permanent home for unrelated business logic.
 
@@ -37,6 +37,11 @@ An extension's `index.ts` is its Pi-facing entry point and composition root. It 
 
 Extensions execute with the Pi process's operating-system permissions. Validate untrusted input, constrain authorization at the boundary, avoid secret-bearing logs, and document file/network side effects. Persist only data required for recovery; use restrictive permissions for sensitive local state.
 
+## Naming and delivery workflow
+
+- Name each first-party Pi extension directory `pi-ad-<name>` and use the same prefix for its installation alias and extension-owned configuration/script paths. Public Pi API identifiers, tool names, hook IDs, and stable error codes retain their API-defined or documented names.
+- Deliver repository changes on topic branches through pull requests. Do not commit or push directly to the default branch. Before merging, run the repository checks and obtain a read-only review of the PR diff.
+
 ## Tests and validation
 
 - Add meaningful regression tests for behavior changes; test module logic with injected fakes rather than live network or real credentials.
@@ -53,5 +58,7 @@ Extensions execute with the Pi process's operating-system permissions. Validate 
 ## Related contracts
 
 - [Telegram bridge](pi-ad-telegram.md)
+- [Pi event hooks](pi-event-hooks.md)
+- [Session usage reporting](session-usage-reporting.md)
 - [Contract meta-rules](../meta-contract.md)
 - [Authoring/Telegram contract task](../features/plugin-authoring-and-telegram-contracts.md)
