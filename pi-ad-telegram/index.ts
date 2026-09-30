@@ -2,22 +2,23 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { homedir } from "node:os";
 import { installBackgroundAdapters } from "./background-adapters/index.ts";
 import type { BackgroundWorkEvent } from "./background-adapters/types.ts";
 import { AgentBoardPublisher, BackgroundAgentBatch } from "./agent-board.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
 import { getPluginTelegramCommand, getTelegramCommandMenu, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
-import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue, type QueueTaskFinalState, type QueuedTelegramTask } from "./queue.ts";
-import { editTelegramMessage, escapeHtml, MAX_TELEGRAM_MESSAGE_LENGTH as MAX_MESSAGE_LENGTH, sendTelegramMessage } from "./message-renderer.ts";
+import { finalizeQueueNotice, formatQueueListing, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue, type QueueTaskFinalState, type QueuedTelegramTask } from "./queue.ts";
+import { editTelegramMessage, escapeHtml, sendTelegramMessage } from "./message-renderer.ts";
 import { TelegramOutbox } from "./outbox.ts";
 import { formatTelegramReplyContext } from "./reply-context.ts";
 import { isTelegramSlashCommand } from "./stale-messages.ts";
+import { getTelegramAgentDirectory, loadTelegramSettings, parseTelegramSettings, TELEGRAM_PRESENTATION_LIMITS, type TelegramSettings } from "./config.ts";
+import { assistantText, availableEfforts, compactTaskPreview, contextUsageText, sessionReportText, splitAllowedIds, TELEGRAM_EFFORT_LEVELS, toolInputSummary, type TelegramEffortLevel } from "./telegram-format.ts";
+import { CompactionActivityLifecycle, compactTokenCount as compactTokens, renderTelegramActivity, type TelegramActivityEntry, type TelegramActivityTool } from "./telegram-activity.ts";
+import { TelegramTypingIndicator } from "./typing-indicator.ts";
 
 const TELEGRAM_API = "https://api.telegram.org";
-const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-type EffortLevel = (typeof EFFORT_LEVELS)[number];
-
+const TELEGRAM_UPDATE_PAGE_SIZE = 100; // Bot API getUpdates maximum result count.
 interface TelegramUser {
   id: number;
   first_name?: string;
@@ -69,7 +70,8 @@ interface TelegramResponse<T> {
 
 interface BufferedTelegramRequest { method: string; body: Record<string, unknown>; }
 
-const telegramOutbox = new TelegramOutbox();
+let settings: TelegramSettings = parseTelegramSettings({}, getTelegramAgentDirectory());
+let telegramOutbox = new TelegramOutbox(settings.outboxPath, settings.retryBaseDelayMs, settings.retryMaxDelayMs);
 const BUFFERED_TELEGRAM_METHODS = new Set(["sendMessage", "editMessageText"]);
 
 async function telegramRequest<T>(
@@ -119,126 +121,6 @@ async function deleteTelegramMessage(
   );
 }
 
-function compactTaskPreview(task: string): string {
-  let preview = task.replace(/\s+/g, " ").trim();
-  preview = preview.replace(/\/(?:home|tmp|workspace|mnt|Users)\/[^\s,;)]*/g, "project files");
-  preview = preview.replace(/\s+(?:in|at) project files\b/gi, "");
-  preview = preview.replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]");
-  preview = preview.replace(/\b(?:api[_-]?key|token|password|secret|authorization)(\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]");
-  preview = preview.replace(/\b(?:sk|ghp|github_pat|xox[baprs])-[A-Za-z0-9_-]{12,}\b/g, "[redacted]");
-  preview = preview.replace(/^review\s+(?:the\s+)?/i, "Review: ")
-    .replace(/^implement\s+/i, "Implementation: ")
-    .replace(/^(?:check|inspect|verify)\s+/i, "Check: ")
-    .replace(/^test\s+/i, "Test: ")
-    .replace(/^research\s+/i, "Research: ");
-  preview = preview.split(/(?<=[.!?])\s/, 1)[0].replace(/[,:;\s]+$/, "");
-  return preview.slice(0, 82) + (preview.length > 82 ? "…" : "");
-}
-
-function countEditLines(oldText: string, newText: string): { added: number; removed: number } {
-  const lines = (text: string) => {
-    const result = text.replace(/\r\n/g, "\n").split("\n");
-    if (result.length > 1 && result[result.length - 1] === "") result.pop();
-    return result;
-  };
-  const oldLines = lines(oldText);
-  const newLines = lines(newText);
-  const n = oldLines.length;
-  const m = newLines.length;
-  if (n * m > 1_000_000) {
-    let prefix = 0;
-    while (prefix < n && prefix < m && oldLines[prefix] === newLines[prefix]) prefix++;
-    let suffix = 0;
-    while (suffix < n - prefix && suffix < m - prefix && oldLines[n - 1 - suffix] === newLines[m - 1 - suffix]) suffix++;
-    return { added: m - prefix - suffix, removed: n - prefix - suffix };
-  }
-  const width = m + 1;
-  const lcs = new Uint32Array((n + 1) * width);
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      lcs[i * width + j] = oldLines[i] === newLines[j]
-        ? lcs[(i + 1) * width + j + 1] + 1
-        : Math.max(lcs[(i + 1) * width + j], lcs[i * width + j + 1]);
-    }
-  }
-  let i = 0;
-  let j = 0;
-  let added = 0;
-  let removed = 0;
-  while (i < n && j < m) {
-    if (oldLines[i] === newLines[j]) { i++; j++; }
-    else if (lcs[(i + 1) * width + j] >= lcs[i * width + j + 1]) { removed++; i++; }
-    else { added++; j++; }
-  }
-  return { added: added + m - j, removed: removed + n - i };
-}
-
-function toolInputSummary(name: string, input: unknown): string {
-  if (!input || typeof input !== "object") return name;
-  const args = input as Record<string, unknown>;
-  const preview = (value: unknown, maxLength: number): string => {
-    if (typeof value !== "string") return "";
-    const text = value.replace(/\s+/g, " ").trim();
-    return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
-  };
-  const urlPreview = (value: unknown): string => {
-    const raw = preview(value, 240);
-    if (!raw) return "";
-    try {
-      const url = new URL(raw);
-      return `${url.host}${url.pathname}` || raw;
-    } catch {
-      return raw;
-    }
-  };
-  const path = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : "";
-  if (name === "edit") {
-    const oldText = typeof args.oldText === "string" ? args.oldText : "";
-    const newText = typeof args.newText === "string" ? args.newText : "";
-    const { added, removed } = countEditLines(oldText, newText);
-    return `✏️ Edit: ${path || "file"} +${added} / -${removed}`;
-  }
-  if (name === "subagent") {
-    const agent = typeof args.agent === "string" ? args.agent : typeof args.workflow === "string" ? `workflow:${args.workflow}` : "workflow";
-    const task = typeof args.task === "string" ? compactTaskPreview(args.task) : "";
-    const model = typeof args.model === "string" ? args.model : "";
-    return `🤖 subagent · ${agent}${task ? ` · ${task}` : ""}${model ? ` · ${model}` : ""}`;
-  }
-  const rangeStart = typeof args.start_line === "number"
-    ? args.start_line
-    : typeof args.offset === "number" ? args.offset : typeof args.limit === "number" ? 1 : undefined;
-  const rangeEnd = typeof args.end_line === "number"
-    ? args.end_line
-    : typeof rangeStart === "number" && typeof args.limit === "number"
-      ? rangeStart + Math.max(1, args.limit) - 1
-      : undefined;
-  const range = rangeStart === undefined ? "" : rangeEnd === undefined ? `${rangeStart}+` : `${rangeStart}–${rangeEnd}`;
-  if (["read", "edit", "write"].includes(name)) {
-    const operation = name === "read" ? "📖 Read" : name === "edit" ? "✏️ Edit" : "📝 Write";
-    return `${operation}: ${path || "file"}${range ? ` (lines ${range})` : ""}`;
-  }
-  if (name === "bash") return `\n\`\`\`bash\n${String(args.command ?? "bash").slice(0, 180)}\n\`\`\``;
-  if (name === "grep" || name === "find") return `🔎 ${name}: ${String(args.pattern ?? args.query ?? "").slice(0, 120)}${path ? ` — ${path}` : ""}`;
-  if (name === "web_search") {
-    const queries = Array.isArray(args.queries) ? args.queries.filter((query): query is string => typeof query === "string") : [];
-    const query = queries.length ? queries.slice(0, 2).map((item) => preview(item, 130)).join(" · ") : preview(args.query, 180);
-    const extra = queries.length > 2 ? ` (+${queries.length - 2})` : "";
-    return `🌐 Search: ${query || "query unavailable"}${extra}`;
-  }
-  if (name === "fetch_content" || name === "web_fetch") {
-    const urls = Array.isArray(args.urls) ? args.urls.filter((url): url is string => typeof url === "string") : [];
-    const url = urls.length ? urls.slice(0, 2).map(urlPreview).join(" · ") : urlPreview(args.url);
-    const extra = urls.length > 2 ? ` (+${urls.length - 2})` : "";
-    return `🔗 Fetch: ${url || "URL unavailable"}${extra}`;
-  }
-  if (name === "source_check") return `🧾 Source check: ${preview(args.claim, 180) || "claim unavailable"}`;
-  if (name === "get_search_content") {
-    const target = args.url ? urlPreview(args.url) : preview(args.query ?? args.findText, 140);
-    return `📚 Retrieve: ${target || `response ${preview(args.responseId, 24)}`}`;
-  }
-  return name;
-}
-
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const finish = () => {
@@ -252,121 +134,23 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-function splitAllowedIds(value: string | undefined): Set<number> {
-  return new Set(
-    (value ?? "")
-      .split(",")
-      .map((part) => Number(part.trim()))
-      .filter((id) => Number.isSafeInteger(id) && id > 0),
-  );
-}
-
-function assistantText(message: { content: Array<{ type: string; text?: string }> }): string {
-  return message.content
-    .filter((part) => part.type === "text" && typeof part.text === "string")
-    .map((part) => part.text!)
-    .join("")
-    .trim();
-}
-
-function availableEfforts(model: ExtensionContext["model"]): EffortLevel[] {
-  if (!model?.reasoning) return ["off"];
-  return EFFORT_LEVELS.filter((level) => {
-    const mappedLevel = model.thinkingLevelMap?.[level];
-    if (mappedLevel === null) return false;
-    if (level === "xhigh" || level === "max") return mappedLevel !== undefined;
-    return true;
-  });
-}
-
-function compactTokens(value: number): string {
-  const tokens = Math.max(0, Math.round(value));
-  if (tokens < 1000) return String(tokens);
-  if (tokens < 10_000) return `${(tokens / 1000).toFixed(1)}k`;
-  return `${Math.round(tokens / 1000)}k`;
-}
-
-function contextUsageText(ctx: ExtensionContext): string {
-  const usage = ctx.getContextUsage();
-  if (!usage) return "Context: no data yet.";
-
-  const format = compactTokens;
-  const window = format(usage.contextWindow);
-  if (usage.tokens === null) return `Context: unknown / ${window} tokens.`;
-
-  const tokens = Math.max(0, usage.tokens);
-  const percent = usage.percent === null ? "" : ` (${usage.percent.toFixed(1)}%)`;
-  const remaining = format(usage.contextWindow - tokens);
-  return `Context: ~${format(tokens)} / ${window} tokens${percent}; ~${remaining} remaining.`;
-}
-
-function sessionReportText(ctx: ExtensionContext): string {
-  let users = 0;
-  let assistants = 0;
-  let toolCalls = 0;
-  let toolResults = 0;
-  let totalMessages = 0;
-  let input = 0;
-  let output = 0;
-  let cacheRead = 0;
-  let cacheWrite = 0;
-  let cost = 0;
-  const addUsage = (usage: any) => {
-    if (!usage) return;
-    input += usage.input ?? 0;
-    output += usage.output ?? 0;
-    cacheRead += usage.cacheRead ?? 0;
-    cacheWrite += usage.cacheWrite ?? 0;
-    cost += usage.cost?.total ?? 0;
-  };
-
-  for (const rawEntry of ctx.sessionManager.getEntries()) {
-    const entry = rawEntry as any;
-    if (entry.type === "usage" || ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage)) {
-      addUsage(entry.usage);
-    }
-    if (entry.type !== "message") continue;
-    totalMessages++;
-    const message = entry.message;
-    if (message.role === "user") users++;
-    else if (message.role === "assistant") {
-      assistants++;
-      if (Array.isArray(message.content)) toolCalls += message.content.filter((part: any) => part.type === "toolCall").length;
-      addUsage(message.usage);
-    } else if (message.role === "toolResult") {
-      toolResults++;
-      addUsage(message.usage);
-    }
-  }
-
-  const promptTokens = input + cacheRead + cacheWrite;
-  const totalTokens = promptTokens + output;
-  const cacheRate = promptTokens > 0 ? ` (${((cacheRead / promptTokens) * 100).toFixed(1)}%)` : "";
-  const sessionName = ctx.sessionManager.getSessionName();
-  const lines = [
-    ...(sessionName ? [`Session: ${sessionName}`] : []),
-    `File: ${ctx.sessionManager.getSessionFile() ?? "in-memory"}`,
-    `ID: ${ctx.sessionManager.getSessionId()}`,
-    `Messages: ${totalMessages} total · ${users} user · ${assistants} assistant · tools: ${toolCalls} calls, ${toolResults} results`,
-    `Tokens: ${promptTokens.toLocaleString()} input · ${cacheRead.toLocaleString()} cached${cacheRate} · ${(input + cacheWrite).toLocaleString()} uncached · ${output.toLocaleString()} output · ${totalTokens.toLocaleString()} total`,
-    `Cost: $${cost.toFixed(3)}`,
-  ];
-  return lines.join("\n");
-}
-
 export default function (pi: ExtensionAPI) {
   let controller: AbortController | undefined;
   let pollTask: Promise<void> | undefined;
   let currentContext: ExtensionContext | undefined;
   let botToken: string | undefined;
+  let typingIndicator = createTypingIndicator();
+  const compactionActivity = new CompactionActivityLifecycle();
   let activeChatId: number | undefined;
   let lastTelegramChatId: number | undefined;
   let activeBashChatId: number | undefined;
   let activeCompactChatId: number | undefined;
+  let activeCompactActivityId: string | undefined;
   let pendingNewChatId: number | undefined;
   let bashController: AbortController | undefined;
   let cancelRequested = false;
-  const queuedTasks = new TelegramTaskQueue();
+  const queuedTasks = new TelegramTaskQueue(settings.queueCapacity);
+  let settingsLoadError: unknown;
   let drainingQueue = false;
   let lastAssistantText = "";
   const activityMessageIds: number[] = [];
@@ -374,7 +158,7 @@ export default function (pi: ExtensionAPI) {
   let activityChatId: number | undefined;
   let currentThinking = "";
   let currentThinkingEntry: { type: "thinking"; text: string } | undefined;
-  const activityOrder: Array<{ type: "tool"; id: string } | { type: "thinking"; text: string }> = [];
+  const activityOrder: TelegramActivityEntry[] = [];
   let activityWorking = false;
   let activityInputTokens = 0;
   let activityOutputTokens = 0;
@@ -389,7 +173,14 @@ export default function (pi: ExtensionAPI) {
   const agentBoardPublisher = new AgentBoardPublisher();
   const backgroundAgents = new BackgroundAgentBatch();
   const backgroundAgentLaunches = new Map<string, { chatId: number; agent: string }>();
-  const toolCalls = new Map<string, { summary: string; status: "running" | "done" | "failed"; exitLabel?: string }>();
+  const toolCalls = new Map<string, TelegramActivityTool>();
+
+  function createTypingIndicator(): TelegramTypingIndicator {
+    return new TelegramTypingIndicator(async (chatId, signal) => {
+      if (!botToken) return;
+      await telegramRequest<true>(botToken, "sendChatAction", { chat_id: chatId, action: "typing" }, signal);
+    }, settings.typingRefreshIntervalMs);
+  }
 
   pi.registerFlag("telegram", {
     description: "Enable the Telegram bridge for this Pi session",
@@ -483,7 +274,7 @@ export default function (pi: ExtensionAPI) {
   async function reply(chatId: number, text: string, signal: AbortSignal, formatMarkdown = false): Promise<void> {
     if (!botToken) return;
     try {
-      await sendTelegramMessage(telegramRequest, botToken, chatId, { text, format: formatMarkdown ? "markdown" : "plain" }, signal);
+      await sendTelegramMessage(telegramRequest, botToken, chatId, { text, format: formatMarkdown ? "markdown" : "plain" }, signal, settings.messageChunkLimit);
     } catch (error) {
       if (!signal.aborted) console.error("[pi-ad-telegram] Failed to send Telegram message:", error);
     }
@@ -495,7 +286,7 @@ export default function (pi: ExtensionAPI) {
       text: `✅ Added to the queue · ID ${task.id}\nView: /queue · remove: /queue_cancel ${task.id}`,
       replyToMessageId: task.replyToMessageId,
       replyMarkup: { inline_keyboard: [[{ text: "Remove from queue", callback_data: `queue-remove:${task.id}` }]] },
-    }, signal);
+    }, signal, settings.messageChunkLimit);
     task.noticeMessageId = messageId;
   }
 
@@ -528,7 +319,7 @@ export default function (pi: ExtensionAPI) {
         await editTelegramMessage(telegramRequest, botToken!, task.chatId, task.noticeMessageId, {
           text: `${emoji} Task ${task.id} ${state}.`,
           replyMarkup: { inline_keyboard: [] },
-        }, signal);
+        }, signal, settings.messageChunkLimit);
       },
       onError: (stage, error) => {
         if (signal.aborted) return;
@@ -543,10 +334,10 @@ export default function (pi: ExtensionAPI) {
 
   const commandRegistry = new TelegramCommandRegistry<{ chatId: number; signal: AbortSignal; ctx: ExtensionContext | undefined }>();
   commandRegistry.register("start", async ({ chatId, signal }) => {
-    await reply(chatId, telegramHelpText(pi.getCommands()), signal);
+    await reply(chatId, telegramHelpText(pi.getCommands(), settings.queueCapacity), signal);
   });
   commandRegistry.register("queue", async ({ chatId, signal }) => {
-    await reply(chatId, formatQueueListing(queuedTasks.listForChat(chatId)), signal, true);
+    await reply(chatId, formatQueueListing(queuedTasks.listForChat(chatId), settings.queuePreviewLimit), signal, true);
   });
   commandRegistry.register("queue_cancel", async ({ chatId, signal }, args) => {
     const id = parseQueueCancelId(args);
@@ -598,7 +389,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-      const shown = models.slice(0, 50).map((model) => {
+      const shown = models.slice(0, TELEGRAM_PRESENTATION_LIMITS.modelChoices).map((model) => {
         const id = `${model.provider}/${model.id}`;
         return `${id === current ? "✓ " : ""}${id} — ${model.name}`;
       });
@@ -652,15 +443,15 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const effort = args.toLowerCase();
-    if (!(EFFORT_LEVELS as readonly string[]).includes(effort)) {
+    if (!(TELEGRAM_EFFORT_LEVELS as readonly string[]).includes(effort)) {
       await reply(chatId, `Unknown effort level. Available: ${levels.join(", ")}.`, signal);
       return;
     }
-    if (!levels.includes(effort as EffortLevel)) {
+    if (!levels.includes(effort as TelegramEffortLevel)) {
       await reply(chatId, `Effort “${effort}” is not supported by this model. Available: ${levels.join(", ")}.`, signal);
       return;
     }
-    pi.setThinkingLevel(effort as EffortLevel);
+    pi.setThinkingLevel(effort as TelegramEffortLevel);
     await reply(chatId, `Effort set to ${pi.getThinkingLevel()}.`, signal);
   });
 
@@ -674,30 +465,24 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     activeCompactChatId = chatId;
-    await reply(chatId, "Compacting context…", signal);
+    const compactionId = startCompactionActivity(chatId, "🧹 Compacting context (requested)", signal);
+    activeCompactActivityId = compactionId;
     if (signal.aborted) {
-      activeCompactChatId = undefined;
+      finishCompactionActivity(compactionId, chatId, "failed", "🧹 Context compaction was cancelled", signal);
       return;
     }
     try {
       ctx.compact({
         ...(args ? { customInstructions: args } : {}),
-        onComplete: () => {
-          if (activeCompactChatId !== chatId) return;
-          activeCompactChatId = undefined;
-          if (controller) void reply(chatId, "Context compaction complete.", controller.signal);
-          void drainQueuedTasks();
-        },
-        onError: (error) => {
-          if (activeCompactChatId !== chatId) return;
-          activeCompactChatId = undefined;
-          if (controller) void reply(chatId, `Failed to compact context: ${error.message}`, controller.signal);
-          void drainQueuedTasks();
-        },
+        onComplete: () => finishCompactionActivity(
+          compactionId, chatId, "done", "🧹 Context compacted", controller?.signal ?? signal,
+        ),
+        onError: (error) => finishCompactionActivity(
+          compactionId, chatId, "failed", `🧹 Context compaction failed: ${error.message}`, controller?.signal ?? signal,
+        ),
       });
     } catch (error) {
-      activeCompactChatId = undefined;
-      await reply(chatId, `Could not start compaction: ${String(error)}`, signal);
+      finishCompactionActivity(compactionId, chatId, "failed", `🧹 Could not start context compaction: ${String(error)}`, signal);
     }
   });
 
@@ -764,6 +549,7 @@ export default function (pi: ExtensionAPI) {
       await reply(chatId, "There is no active task.", signal);
     } else {
       cancelRequested = true;
+      if (activeChatId !== undefined) typingIndicator.stop();
       ctx.abort();
       await reply(chatId, "Stopping the current task…", signal);
     }
@@ -791,6 +577,10 @@ export default function (pi: ExtensionAPI) {
 
   async function startTelegram(ctx: ExtensionContext): Promise<boolean> {
     if (controller && !controller.signal.aborted) return true;
+    if (settingsLoadError) {
+      tellPi(ctx, `Telegram bot was not started: ${String(settingsLoadError)}`);
+      return false;
+    }
     const token = process.env.PI_TELEGRAM_BOT_TOKEN?.trim();
     const allowedIds = splitAllowedIds(process.env.PI_TELEGRAM_ALLOWED_USER_IDS);
     if (!token || allowedIds.size === 0) {
@@ -827,6 +617,7 @@ export default function (pi: ExtensionAPI) {
   async function stopTelegram(): Promise<void> {
     const activeController = controller;
     if (!activeController) return;
+    typingIndicator.stop();
     const chatId = activityChatId;
     if (chatId !== undefined && botToken && !activeController.signal.aborted) {
       await deleteActivity(chatId, activeController.signal);
@@ -874,7 +665,7 @@ export default function (pi: ExtensionAPI) {
 
   function ensureAgentBoardPolling(): void {
     if (agentBoardRefreshTimer || !backgroundAgents.hasRunning()) return;
-    agentBoardRefreshTimer = setInterval(() => { void pollRunningAgentStatus(); }, 15_000);
+    agentBoardRefreshTimer = setInterval(() => { void pollRunningAgentStatus(); }, settings.agentBoardRefreshIntervalMs);
     void pollRunningAgentStatus();
   }
 
@@ -894,12 +685,12 @@ export default function (pi: ExtensionAPI) {
         sendBoard: async (targetChatId, boardText, requestSignal) => {
           const [messageId] = await sendTelegramMessage(telegramRequest, token, targetChatId, {
             text: boardText, format: "html", disableWebPagePreview: true,
-          }, requestSignal);
+          }, requestSignal, settings.messageChunkLimit);
           return messageId;
         },
         editBoard: async (targetChatId, messageId, boardText, requestSignal) => editTelegramMessage(
           telegramRequest, token, targetChatId, messageId,
-          { text: boardText, format: "html", disableWebPagePreview: true }, requestSignal,
+          { text: boardText, format: "html", disableWebPagePreview: true }, requestSignal, settings.messageChunkLimit,
         ),
         pinBoard: async (targetChatId, messageId, requestSignal) => {
           await telegramRequest<true>(token, "pinChatMessage", {
@@ -913,11 +704,11 @@ export default function (pi: ExtensionAPI) {
       if (errors.staleUnpin && !signal.aborted) console.error("[pi-ad-telegram] Could not clear the previous pinned agent board:", errors.staleUnpin);
       if (errors.pin) {
         console.error("[pi-ad-telegram] Could not pin the background-agent board:", errors.pin);
-        await reply(chatId, `Could not pin the agent board; it will remain a regular message. Telegram error: ${String(errors.pin).slice(0, 240)}`, signal);
+        await reply(chatId, `Could not pin the agent board; it will remain a regular message. Telegram error: ${String(errors.pin).slice(0, TELEGRAM_PRESENTATION_LIMITS.telegramError)}`, signal);
       }
       if (errors.unpin) {
         console.error("[pi-ad-telegram] Could not unpin the background-agent board:", errors.unpin);
-        await reply(chatId, `Could not automatically unpin the agent board. Telegram error: ${String(errors.unpin).slice(0, 240)}`, signal);
+        await reply(chatId, `Could not automatically unpin the agent board. Telegram error: ${String(errors.unpin).slice(0, TELEGRAM_PRESENTATION_LIMITS.telegramError)}`, signal);
       }
     }).catch((error) => {
       if (!signal.aborted) console.error("[pi-ad-telegram] Failed to update background-agent board:", error);
@@ -993,70 +784,26 @@ export default function (pi: ExtensionAPI) {
   }
 
   function renderActivity(): string[] {
-    // Keep tool calls visible even if an event arrived before the activity timeline was initialized.
-    const ordered = [...activityOrder];
-    const orderedToolIds = new Set(ordered.flatMap((entry) => entry.type === "tool" ? [entry.id] : []));
-    for (const id of toolCalls.keys()) {
-      if (!orderedToolIds.has(id)) ordered.push({ type: "tool", id });
-    }
-    const visible = ordered.slice(-35);
-    const hiddenCount = ordered.length - visible.length;
-    const lines = visible.flatMap((entry) => {
-      if (entry.type === "thinking") {
-        const plain = entry.text
-          .replace(/\*\*(.+?)\*\*/gs, "$1")
-          .replace(/__(.+?)__/gs, "$1")
-          .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "$1")
-          .replace(/_([^_\n]+)_/g, "$1")
-          .replace(/\r\n/g, "\n")
-          .replace(/\n[ \t]*\n+/g, "\n")
-          .trim();
-        return plain ? [`• ${escapeHtml(plain.slice(-550))}`] : [];
-      }
-      const tool = toolCalls.get(entry.id);
-      if (!tool) return [];
-      const { summary, status, exitLabel } = tool;
-      const bash = /^\n```bash\n([\s\S]*?)\n```$/.exec(summary);
-      const label = bash
-        ? (status === "running" ? "Running…" : `Exit: ${exitLabel ?? (status === "failed" ? "error" : "0")}`)
-        : status === "running" ? "…" : status === "failed" ? "❌" : "✓";
-      return [bash
-        ? `<pre><code class="language-bash">${escapeHtml(bash[1])}</code></pre> ${label}`
-        : `• ${escapeHtml(summary.slice(0, 550))} ${label}`];
-    });
     const usage = currentContext?.getContextUsage();
-    const contextWindow = usage?.contextWindow ?? 0;
-    const contextPercent = usage?.percent;
-    const stats = [
-      activityInputTokens ? `↑${compactTokens(activityInputTokens)}` : "",
-      activityOutputTokens ? `↓${compactTokens(activityOutputTokens)}` : "",
-      activityCacheRead ? `R${compactTokens(activityCacheRead)}` : "",
-      activityCacheWrite ? `W${compactTokens(activityCacheWrite)}` : "",
-      activityCacheHitRate === undefined ? "" : `CH${activityCacheHitRate.toFixed(1)}%`,
-      `$${activityCost.toFixed(3)}${currentContext?.model?.provider === "kimi-coding" ? " (sub)" : ""}`, 
-      `${contextPercent === null || contextPercent === undefined ? "?" : `${contextPercent.toFixed(1)}%`}/${compactTokens(contextWindow)} (auto)`,
-      currentContext?.model ? `${currentContext.model.id} • ${pi.getThinkingLevel()}` : "",
-    ].filter(Boolean).join(" ");
-    const footer = `${activityWorking ? "⏳ Working · " : "✓ Idle · "}${stats}`;
-    const header = `🔧 Pi activity${hiddenCount ? ` (last ${visible.length})` : ""}:${hiddenCount ? `\n… ${hiddenCount} more events` : ""}`;
-    const messages: string[] = [];
-    let current = header;
-    for (const line of lines) {
-      const next = `${current}\n${line}`;
-      if (next.length > MAX_MESSAGE_LENGTH - 100 && current !== header) {
-        messages.push(current);
-        current = `🔧 Pi activity (continued)\n${line}`;
-      } else {
-        current = next;
-      }
-    }
-    if (`${current}\n\n${footer}`.length <= MAX_MESSAGE_LENGTH) current += `\n\n${footer}`;
-    else {
-      if (current !== header) messages.push(current);
-      current = footer;
-    }
-    messages.push(current);
-    return messages;
+    return renderTelegramActivity({
+      order: activityOrder,
+      tools: toolCalls,
+      working: activityWorking,
+      inputTokens: activityInputTokens,
+      outputTokens: activityOutputTokens,
+      cacheRead: activityCacheRead,
+      cacheWrite: activityCacheWrite,
+      cacheHitRate: activityCacheHitRate,
+      cost: activityCost,
+      contextWindow: usage?.contextWindow ?? 0,
+      contextPercent: usage?.percent,
+      model: currentContext?.model ? { id: currentContext.model.id, provider: currentContext.model.provider } : undefined,
+      thinkingLevel: pi.getThinkingLevel(),
+      messageLimit: settings.messageChunkLimit,
+      historyLimit: settings.activityHistoryLimit,
+      textLimit: settings.activityTextLimit,
+      updatedAt: new Date(),
+    });
   }
 
   function refreshActivity(chatId: number, signal: AbortSignal): Promise<void> {
@@ -1071,11 +818,11 @@ export default function (pi: ExtensionAPI) {
       for (let index = 0; index < parts.length; index++) {
         const text = parts[index];
         if (activityMessageIds[index] === undefined) {
-          const [messageId] = await sendTelegramMessage(telegramRequest, botToken, chatId, { text, format: "html" }, signal);
+          const [messageId] = await sendTelegramMessage(telegramRequest, botToken, chatId, { text, format: "html" }, signal, settings.messageChunkLimit);
           activityMessageIds[index] = messageId;
           activityTexts[index] = text;
         } else if (activityTexts[index] !== text) {
-          await editTelegramMessage(telegramRequest, botToken, chatId, activityMessageIds[index], { text, format: "html" }, signal);
+          await editTelegramMessage(telegramRequest, botToken, chatId, activityMessageIds[index], { text, format: "html" }, signal, settings.messageChunkLimit);
           activityTexts[index] = text;
         }
       }
@@ -1090,6 +837,37 @@ export default function (pi: ExtensionAPI) {
       activityMessageIds.length = parts.length;
       activityTexts.length = parts.length;
     });
+  }
+
+  function startCompactionActivity(chatId: number, summary: string, signal: AbortSignal): string {
+    if (activeChatId === undefined) activityWorking = true;
+    const row = compactionActivity.begin(summary);
+    if (!toolCalls.has(row.id)) activityOrder.push({ type: "tool", id: row.id });
+    toolCalls.set(row.id, { summary: row.summary, status: row.status });
+    void refreshActivity(chatId, signal);
+    return row.id;
+  }
+
+  function finishCompactionActivity(
+    id: string,
+    chatId: number,
+    status: "done" | "failed",
+    summary: string,
+    signal: AbortSignal,
+  ): void {
+    const row = compactionActivity.finish(id, status, summary);
+    if (row) {
+      toolCalls.set(row.id, { summary: row.summary, status: row.status });
+      if (activeChatId === undefined && activeCompactChatId === chatId) activityWorking = false;
+      void refreshActivity(chatId, signal);
+    }
+    if (activeCompactActivityId === id) {
+      activeCompactActivityId = undefined;
+      if (activeCompactChatId === chatId) {
+        activeCompactChatId = undefined;
+        void drainQueuedTasks();
+      }
+    }
   }
 
   async function deleteActivity(chatId: number, signal: AbortSignal): Promise<void> {
@@ -1126,7 +904,7 @@ export default function (pi: ExtensionAPI) {
       const result = await pi.exec("bash", ["-lc", command], {
         cwd,
         signal: taskController.signal,
-        timeout: 120_000,
+        timeout: settings.commandTimeoutMs,
       });
       const sections = [`Command:\n\`\`\`bash\n${command}\n\`\`\``, `Exit code: ${result.code}${result.killed ? " (process stopped)" : ""}`];
       if (result.stdout) sections.push(`stdout:\n${result.stdout}`);
@@ -1217,7 +995,7 @@ export default function (pi: ExtensionAPI) {
       if (!ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined || drainingQueue) {
         const task = queuedTasks.enqueue(chatId, taskText, message.message_id);
         if (!task) {
-          await reply(chatId, `Queue is full (maximum ${MAX_QUEUED_TASKS} tasks). The command was not added; try again later or use /clear_queue.`, signal);
+          await reply(chatId, `Queue is full (maximum ${settings.queueCapacity} tasks). The command was not added; try again later or use /clear_queue.`, signal);
           return;
         }
         await sendQueuedTask(chatId, task, signal);
@@ -1240,7 +1018,7 @@ export default function (pi: ExtensionAPI) {
     if (!ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined || drainingQueue) {
       const task = queuedTasks.enqueue(chatId, taskText, message.message_id);
       if (!task) {
-        await reply(chatId, `Queue is full (maximum ${MAX_QUEUED_TASKS} tasks). The task was not added; try again later or use /clear_queue.`, signal);
+        await reply(chatId, `Queue is full (maximum ${settings.queueCapacity} tasks). The task was not added; try again later or use /clear_queue.`, signal);
         return;
       }
       await sendQueuedTask(chatId, task, signal);
@@ -1252,6 +1030,7 @@ export default function (pi: ExtensionAPI) {
 
   async function dispatchTask(chatId: number, taskText: string, ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
     activeChatId = chatId;
+    typingIndicator.start(chatId, signal);
     activityWorking = true;
     currentThinking = "";
     currentThinkingEntry = undefined;
@@ -1264,6 +1043,7 @@ export default function (pi: ExtensionAPI) {
       if (signal.aborted) return;
       pi.sendUserMessage(taskText, { expandPromptTemplates: true });
     } catch (error) {
+      typingIndicator.stop();
       activeChatId = undefined;
       await reply(chatId, `Failed to send the task to Pi: ${String(error)}`, signal);
       void drainQueuedTasks();
@@ -1286,7 +1066,7 @@ export default function (pi: ExtensionAPI) {
       if (isSessionBusy(currentContext) || drainingQueue) {
         const queued = queuedTasks.enqueue(chatId, task);
         if (!queued) {
-          await reply(chatId, `Offline batch not queued: the Telegram task queue is full (maximum ${MAX_QUEUED_TASKS}).`, signal);
+          await reply(chatId, `Offline batch not queued: the Telegram task queue is full (maximum ${settings.queueCapacity}).`, signal);
           continue;
         }
         await sendQueuedTask(chatId, queued, signal);
@@ -1321,7 +1101,7 @@ export default function (pi: ExtensionAPI) {
               startupPending.push(...page);
               startupScanOffset = page[page.length - 1]!.update_id + 1;
             }
-          } while (page.length >= 100 && !signal.aborted);
+          } while (page.length >= TELEGRAM_UPDATE_PAGE_SIZE && !signal.aborted);
           offset = startupScanOffset;
           const stale = startupPending.filter((update) => update.message?.chat.type === "private" && allowedIds.has(update.message.from?.id ?? -1));
           startupPending = [];
@@ -1332,17 +1112,17 @@ export default function (pi: ExtensionAPI) {
         let updates = await telegramRequest<TelegramUpdate[]>(
           token,
           "getUpdates",
-          { offset, timeout: 20, allowed_updates: ["message", "callback_query"] },
+          { offset, timeout: settings.longPollTimeoutSeconds, allowed_updates: ["message", "callback_query"] },
           signal,
         );
-        staleBacklog ||= networkFailureStartedAt !== undefined && Date.now() - networkFailureStartedAt >= 30_000;
+        staleBacklog ||= networkFailureStartedAt !== undefined && Date.now() - networkFailureStartedAt >= settings.staleBacklogThresholdMs;
         const staleReconnectBatch = staleBacklog;
         failures = 0;
         networkFailureStartedAt = undefined;
         if (staleBacklog) {
           stalePending.push(...updates);
           if (updates.length > 0) offset = updates[updates.length - 1]!.update_id + 1;
-          while (updates.length >= 100 && !signal.aborted) {
+          while (updates.length >= TELEGRAM_UPDATE_PAGE_SIZE && !signal.aborted) {
             updates = await telegramRequest<TelegramUpdate[]>(
               token,
               "getUpdates",
@@ -1374,7 +1154,7 @@ export default function (pi: ExtensionAPI) {
         if (staleBatch) {
           const stale = updates.filter((update) => update.message?.chat.type === "private" && allowedIds.has(update.message.from?.id ?? -1));
           if (stale.length > 0) await dispatchStaleBatch(stale, signal);
-          if (updates.length < 100) staleBacklog = false;
+          if (updates.length < TELEGRAM_UPDATE_PAGE_SIZE) staleBacklog = false;
         }
         for (const update of updates) {
           if (staleBatch && update.message && allowedIds.has(update.message.from?.id ?? -1)) continue;
@@ -1412,7 +1192,8 @@ export default function (pi: ExtensionAPI) {
         // Keep the offset unchanged and retry transient polling/network failures with capped exponential backoff.
         failures++;
         networkFailureStartedAt ??= Date.now();
-        const retryDelay = Math.min(1000 * 2 ** Math.min(failures - 1, 5), 30_000);
+        const maxExponent = Math.max(0, Math.ceil(Math.log2(settings.retryMaxDelayMs / settings.retryBaseDelayMs)));
+        const retryDelay = Math.min(settings.retryBaseDelayMs * 2 ** Math.min(failures - 1, maxExponent), settings.retryMaxDelayMs);
         console.warn(`[pi-ad-telegram] Telegram polling request failed; retrying in ${retryDelay / 1000}s (attempt ${failures}).`, error);
         await sleep(retryDelay, signal);
       }
@@ -1420,7 +1201,22 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_event, ctx) => {
+    await stopTelegram();
+    compactionActivity.reset();
+    activeCompactChatId = undefined;
+    activeCompactActivityId = undefined;
     currentContext = ctx;
+    try {
+      settings = await loadTelegramSettings();
+      settingsLoadError = undefined;
+      typingIndicator = createTypingIndicator();
+      queuedTasks.setCapacity(settings.queueCapacity);
+      telegramOutbox = new TelegramOutbox(settings.outboxPath, settings.retryBaseDelayMs, settings.retryMaxDelayMs);
+    } catch (error) {
+      settingsLoadError = error;
+      tellPi(ctx, `Telegram settings could not be loaded: ${String(error)}`);
+      return;
+    }
     activityInputTokens = 0;
     activityOutputTokens = 0;
     activityCacheRead = 0;
@@ -1442,8 +1238,6 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    // Replacing a session must not leave the previous polling loop running.
-    await stopTelegram();
     if (pi.getFlag("telegram") === true || process.env.PI_TELEGRAM_ENABLED === "1") {
       await startTelegram(ctx);
     }
@@ -1456,7 +1250,7 @@ export default function (pi: ExtensionAPI) {
     currentThinking = "";
     currentThinkingEntry = undefined;
     activityOrder.push({ type: "tool", id: event.toolCallId });
-    const summary = toolInputSummary(event.toolName, event.args);
+    const summary = toolInputSummary(event.toolName, event.args, settings.backgroundTaskPreviewLimit);
     toolCalls.set(event.toolCallId, { summary, status: "running" });
     void refreshActivity(chatId, signal);
     if (event.toolName === "edit" && currentContext && event.args && typeof event.args === "object") {
@@ -1504,7 +1298,7 @@ export default function (pi: ExtensionAPI) {
       currentThinkingEntry ??= { type: "thinking", text: "" };
       if (!activityOrder.includes(currentThinkingEntry)) activityOrder.push(currentThinkingEntry);
       currentThinking += streamEvent.delta;
-      currentThinkingEntry.text = currentThinking.slice(-2500);
+      currentThinkingEntry.text = currentThinking.slice(-settings.activityTextLimit);
       void refreshActivity(activeChatId, controller.signal);
       return;
     }
@@ -1513,7 +1307,7 @@ export default function (pi: ExtensionAPI) {
       if (currentThinking.trim()) {
         currentThinkingEntry ??= { type: "thinking", text: "" };
         if (!activityOrder.includes(currentThinkingEntry)) activityOrder.push(currentThinkingEntry);
-        currentThinkingEntry.text = currentThinking.slice(-2500);
+        currentThinkingEntry.text = currentThinking.slice(-settings.activityTextLimit);
         void refreshActivity(activeChatId, controller.signal);
       }
     }
@@ -1535,7 +1329,7 @@ export default function (pi: ExtensionAPI) {
           id: event.id,
           agent: event.agent,
           model,
-          task: compactTaskPreview(taskText),
+          task: compactTaskPreview(taskText, settings.backgroundTaskPreviewLimit),
           status: "running",
           asyncDir: event.statusDirectory,
           telegramChatId: chatId,
@@ -1614,24 +1408,29 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_before_compact", (event) => {
-    if (activeChatId === undefined || !controller) return;
+    const chatId = activeChatId ?? activeCompactChatId;
+    if (chatId === undefined || !controller) return;
     const reason = event.reason === "threshold" ? "context threshold reached" :
       event.reason === "overflow" ? "recovering from context overflow" : "requested by Pi";
-    void reply(activeChatId, `Pi started compacting context (${reason})…`, controller.signal);
+    const id = startCompactionActivity(chatId, `🧹 Compacting context (${reason})`, controller.signal);
+    if (activeCompactChatId === chatId && activeCompactActivityId === undefined) activeCompactActivityId = id;
   });
 
   pi.on("session_compact", (event) => {
-    if (activeChatId === undefined || !controller) return;
+    const chatId = activeChatId ?? activeCompactChatId;
+    if (chatId === undefined || !controller) return;
     const reason = event.reason === "threshold" ? "automatically at the context threshold" :
       event.reason === "overflow" ? "to recover from context overflow" : "as requested";
-    void reply(activeChatId, `Pi context compacted (${reason}).`, controller.signal);
-    void refreshActivity(activeChatId, controller.signal);
+    const id = compactionActivity.active?.id ?? startCompactionActivity(chatId, "🧹 Compacting context", controller.signal);
+    finishCompactionActivity(id, chatId, "done", `🧹 Context compacted (${reason})`, controller.signal);
   });
 
   pi.on("session_compact_failed", (event) => {
-    if (activeChatId === undefined || !controller) return;
+    const chatId = activeChatId ?? activeCompactChatId;
+    if (chatId === undefined || !controller) return;
     const details = event.errorMessage ? `: ${event.errorMessage}` : event.aborted ? " (operation aborted)" : "";
-    void reply(activeChatId, `Failed to compact Pi context${details}.`, controller.signal);
+    const id = compactionActivity.active?.id ?? startCompactionActivity(chatId, "🧹 Compacting context", controller.signal);
+    finishCompactionActivity(id, chatId, "failed", `🧹 Context compaction failed${details}`, controller.signal);
   });
 
   pi.on("message_end", (event) => {
@@ -1653,6 +1452,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_settled", async () => {
+    typingIndicator.stop();
     const chatId = activeChatId ?? lastTelegramChatId;
     if (chatId !== undefined && botToken && controller) {
       const text = lastAssistantText || "Pi completed the task without a text response.";
@@ -1677,7 +1477,7 @@ export default function (pi: ExtensionAPI) {
     await stopTelegram();
     bashController?.abort();
     await activityQueue;
-    if (activityChat !== undefined && botToken) await deleteActivity(activityChat, AbortSignal.timeout(5000));
+    if (activityChat !== undefined && botToken) await deleteActivity(activityChat, AbortSignal.timeout(settings.shutdownCleanupTimeoutMs));
     controller = undefined;
     pollTask = undefined;
     botToken = undefined;
@@ -1686,6 +1486,8 @@ export default function (pi: ExtensionAPI) {
     lastTelegramChatId = undefined;
     activeBashChatId = undefined;
     activeCompactChatId = undefined;
+    activeCompactActivityId = undefined;
+    compactionActivity.reset();
     pendingNewChatId = undefined;
     bashController = undefined;
     cancelRequested = false;

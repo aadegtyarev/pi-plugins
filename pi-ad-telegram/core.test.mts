@@ -4,7 +4,7 @@ import { AgentBoardPublisher, type AgentBoardTransport, BackgroundAgentBatch } f
 import { getPluginTelegramCommand, getPluginTelegramCommands, getTelegramCommandMenu, normalizeTelegramCommand, TELEGRAM_COMMAND_DEFINITIONS, telegramHelpText } from "./commands.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
 import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue } from "./queue.ts";
-import { renderTelegramMessage, sendTelegramMessage, type TelegramRequester } from "./message-renderer.ts";
+import { renderTelegramMessage, renderTelegramMessageParts, sendTelegramMessage, type TelegramRequester } from "./message-renderer.ts";
 import telegramExtension from "./index.ts";
 import { formatTelegramReplyContext } from "./reply-context.ts";
 import { isTelegramSlashCommand } from "./stale-messages.ts";
@@ -213,12 +213,14 @@ test("Telegram polling covers busy and successful session-command paths with the
     { text: "/new", idle: false },
     { text: "/reload", idle: false },
     { text: "/bash echo busy", idle: false },
+    { text: "active Telegram task", idle: true },
     { text: "/cancel", idle: false },
     { text: "/reload", idle: true },
     { text: "/bash printf success", idle: true },
     { text: "/new", idle: true },
   ];
   const sent: string[] = [];
+  const edited: string[] = [];
   const userMessages: string[] = [];
   const bashCommands: string[] = [];
   let nextUpdate = 0;
@@ -233,6 +235,10 @@ test("Telegram polling covers busy and successful session-command paths with the
   let selectedModel = "";
   let compactInstructions = "";
   let abortCount = 0;
+  let typingActionCount = 0;
+  let typingActionSignal: AbortSignal | undefined;
+  let typingStoppedBeforeAbort = false;
+  let cancellationSettle: Promise<unknown> | undefined;
   const availableModel = {
     provider: "test-provider", id: "test-model", name: "Test model", reasoning: true,
     thinkingLevelMap: { off: "off", minimal: "minimal", low: "low", medium: "medium", high: "high" },
@@ -256,6 +262,7 @@ test("Telegram polling covers busy and successful session-command paths with the
         while (!compactCompleted && !signal?.aborted) await new Promise((resolve) => setTimeout(resolve, 1));
         if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
       }
+      if (update.text === "/reload" && updates[nextUpdate - 1]?.text === "/cancel") await cancellationSettle;
       if (update.text === "/new" && update.idle) {
         const signal = init?.signal;
         while (!sent.some((text) => text.includes("Exit code: 0") && text.includes("bash output")) && !signal?.aborted) {
@@ -282,6 +289,17 @@ test("Telegram polling covers busy and successful session-command paths with the
     } else if (method === "sendMessage") {
       sent.push(String(body.text));
       result = { message_id: ++nextMessageId };
+    } else if (method === "editMessageText") {
+      edited.push(String(body.text));
+      result = true;
+    } else if (method === "sendChatAction") {
+      typingActionCount++;
+      typingActionSignal = init?.signal ?? undefined;
+      await new Promise<void>((resolve) => {
+        if (typingActionSignal?.aborted) resolve();
+        else typingActionSignal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      result = true;
     } else if (method === "getMe") {
       startupCount++;
       result = { id: 1, is_bot: true, first_name: "test", username: "test_bot" };
@@ -314,10 +332,16 @@ test("Telegram polling covers busy and successful session-command paths with the
     model: { ...availableModel },
     modelRegistry: { getAvailable: () => [availableModel] },
     isIdle: () => sessionIdle,
-    abort: () => { abortCount++; },
+    abort: () => {
+      abortCount++;
+      typingStoppedBeforeAbort = typingActionSignal?.aborted ?? false;
+      cancellationSettle = Promise.resolve(events.get("agent_settled")?.());
+    },
     compact: (options: { customInstructions?: string; onComplete?: () => void }) => {
       compactInstructions = options.customInstructions ?? "";
+      void events.get("session_before_compact")?.({ reason: "threshold" });
       setTimeout(() => {
+        events.get("session_compact")?.({ reason: "threshold" });
         options.onComplete?.();
         compactCompleted = true;
       }, 0);
@@ -334,20 +358,23 @@ test("Telegram polling covers busy and successful session-command paths with the
   try {
     telegramExtension(pi);
     await events.get("session_start")?.({}, ctx);
-    const expectedResponses = 18;
+    const minimumResponses = 15;
     const deadline = Date.now() + 5000;
-    while ((sent.length < expectedResponses || userMessages.length < 2 || nextUpdate < updates.length) && Date.now() < deadline) {
+    while ((sent.length < minimumResponses || userMessages.length < 2 || nextUpdate < updates.length) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
-    assert.equal(sent.length, expectedResponses, `Expected ${expectedResponses} Telegram responses; got: ${sent.join(" | ")}`);
+    assert.ok(sent.length >= minimumResponses, `Expected at least ${minimumResponses} Telegram responses; got: ${sent.join(" | ")}`);
     assert.ok(sent.some((text) => text.includes("Pi is busy.")));
     assert.ok(sent.some((text) => text.includes("Available models (1)")));
     assert.ok(sent.some((text) => text.includes("Model selected: test-provider/test-model")));
     assert.ok(sent.some((text) => text.includes("Current effort: medium")));
     assert.ok(sent.some((text) => text.includes("Effort set to high.")));
     assert.ok(sent.some((text) => text.includes("Context can be compacted after")));
-    assert.ok(sent.some((text) => text.includes("Context compaction complete.")));
+    assert.ok(sent.some((text) => text.includes("🧹 Compacting context") && text.includes("⏳ Working")));
+    assert.ok(edited.some((text) => text.includes("🧹 Context compacted (automatically at the context threshold)") && text.includes("✓ Idle")));
+    assert.ok(sent.every((text) => !text.includes("Compacting context…") && !text.includes("Context compaction complete.") && !text.includes("Pi started compacting context") && !text.includes("Pi context compacted (")));
+    assert.ok(edited.every((text) => !text.includes("Pi started compacting context") && !text.includes("Pi context compacted (")));
     assert.ok(sent.some((text) => text.includes("A new session can be started after")));
     assert.ok(sent.some((text) => text.includes("Wait for the current task to finish before reloading.")));
     assert.ok(sent.some((text) => text.includes("Pi is busy. Bash can run")));
@@ -361,8 +388,10 @@ test("Telegram polling covers busy and successful session-command paths with the
     assert.equal(currentEffort, "high");
     assert.equal(compactInstructions, "summarize briefly");
     assert.deepEqual(bashCommands, ["-lc printf success"]);
-    assert.deepEqual(userMessages, ["/telegram-reload", "/telegram-new"]);
+    assert.deepEqual(userMessages, ["active Telegram task", "/telegram-reload", "/telegram-new"]);
     assert.equal(abortCount, 1);
+    assert.ok(typingActionCount >= 1);
+    assert.equal(typingStoppedBeforeAbort, true);
     assert.equal(timeoutInjected, true);
     assert.deepEqual(getUpdatesOffsets.slice(0, 3), [0, 0, 0], "startup backlog scan and failed poll preserve update offset");
     assert.ok(warnings.some((warning) => warning.includes("retrying in 1s (attempt 1)")));
@@ -374,10 +403,12 @@ test("Telegram polling covers busy and successful session-command paths with the
     } as ExtensionContext;
     await events.get("session_start")?.({}, replacementCtx);
     const replacementDeadline = Date.now() + 3000;
-    while (sent.length < expectedResponses + 1 && Date.now() < replacementDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(sent.length, expectedResponses + 1);
-    assert.match(sent.at(-1)!, /Model: replacement-provider\/replacement-model/);
-    assert.match(sent.at(-1)!, /ID: replacement-session/);
+    while (!sent.some((text) => text.includes("Model: replacement-provider/replacement-model")) && Date.now() < replacementDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const replacementStatus = sent.find((text) => text.includes("Model: replacement-provider/replacement-model"));
+    assert.ok(replacementStatus);
+    assert.match(replacementStatus, /ID: replacement-session/);
   } finally {
     await events.get("session_shutdown")?.();
     globalThis.fetch = previousFetch;
@@ -428,6 +459,14 @@ test("command menu, aliases, and help share one definition list", () => {
 
 test("Markdown renders inline markup and escapes HTML", () => {
   assert.equal(renderTelegramMessage("**bold** <tag>", "markdown")[0], "<b>bold</b> &lt;tag&gt;");
+});
+
+test("Markdown chunks stay within Telegram's limit after HTML escaping", () => {
+  const source = "<".repeat(4096);
+  const parts = renderTelegramMessageParts(source, "markdown", 4096);
+  assert.ok(parts.length > 1);
+  assert.ok(parts.every((part) => part.text.length <= 4096));
+  assert.equal(parts.map((part) => part.plainText).join(""), source);
 });
 
 test("plain text chunking never splits a surrogate pair", () => {

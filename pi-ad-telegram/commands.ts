@@ -1,3 +1,8 @@
+import { DEFAULT_TELEGRAM_SETTINGS } from "./config.ts";
+
+const TELEGRAM_COMMAND_DESCRIPTION_LIMIT = 256;
+const TELEGRAM_COMMAND_MENU_LIMIT = 100;
+
 export interface PiSessionCommand {
   name: string;
   description?: string;
@@ -58,7 +63,7 @@ function resolvePluginTelegramCommands(commands: readonly PiSessionCommand[]): R
     const telegramCommand = name.replace(/-/g, "_");
     if (seen.has(telegramCommand)) continue;
     seen.add(telegramCommand);
-    const description = (command.description || `Run ${piCommand}`).replace(/[\r\n]+/g, " ").slice(0, 256);
+    const description = (command.description || `Run ${piCommand}`).replace(/[\r\n]+/g, " ").slice(0, TELEGRAM_COMMAND_DESCRIPTION_LIMIT);
     result.push({ command: telegramCommand, piCommand, description });
   }
   return result;
@@ -70,16 +75,19 @@ export function getPluginTelegramCommands(commands: readonly PiSessionCommand[] 
 
 export function getTelegramCommandMenu(commands: readonly PiSessionCommand[] = []): Array<{ command: string; description: string }> {
   const builtIns = TELEGRAM_COMMAND_DEFINITIONS.flatMap((definition) => definition.menu ?? []);
-  return [...builtIns, ...getPluginTelegramCommands(commands)].slice(0, 100);
+  return [...builtIns, ...getPluginTelegramCommands(commands)].slice(0, TELEGRAM_COMMAND_MENU_LIMIT);
 }
 
 export function getPluginTelegramCommand(name: string, commands: readonly PiSessionCommand[] = []): ResolvedPluginCommand | undefined {
   return resolvePluginTelegramCommands(commands).find((command) => command.command === name.toLowerCase());
 }
 
-export function telegramHelpText(commands: readonly PiSessionCommand[] = []): string {
+export function telegramHelpText(
+  commands: readonly PiSessionCommand[] = [],
+  queueCapacity = DEFAULT_TELEGRAM_SETTINGS.queueCapacity,
+): string {
   return [
-    "I'm connected to a running Pi session. Send text to pass a task to the agent. Messages received while Pi is busy are added to a FIFO queue (up to 20 tasks) and run one at a time after each operation finishes. Background agents do not block new input after the parent turn completes.",
+    `I'm connected to a running Pi session. Send text to pass a task to the agent. Messages received while Pi is busy are added to a FIFO queue (up to ${queueCapacity} tasks) and run one at a time after each operation finishes. Background agents do not block new input after the parent turn completes.`,
     ...TELEGRAM_COMMAND_DEFINITIONS.map((definition) => definition.help),
     ...getPluginTelegramCommands(commands).map((command) => `/${command.command} — ${command.description}`),
   ].join("\n\n");

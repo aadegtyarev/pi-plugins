@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { DEFAULT_TELEGRAM_SETTINGS, getTelegramAgentDirectory } from "./config.ts";
 
 export type TelegramOutboxRequester = <T>(
   token: string,
@@ -16,13 +16,16 @@ export interface TelegramOutboxEntry {
   body: Record<string, unknown>;
 }
 
-const DEFAULT_OUTBOX_PATH = join(homedir(), ".pi", "agent", "telegram-outbox.json");
-const RETRY_LIMIT_MS = 30_000;
+const DEFAULT_OUTBOX_PATH = join(getTelegramAgentDirectory(), "telegram-outbox.json");
+const DEFAULT_RETRY_BASE_DELAY_MS = DEFAULT_TELEGRAM_SETTINGS.retryBaseDelayMs;
+const DEFAULT_RETRY_MAX_DELAY_MS = DEFAULT_TELEGRAM_SETTINGS.retryMaxDelayMs;
+const SERVER_ERROR_STATUS = 500;
+const TRANSIENT_HTTP_STATUSES = new Set([408, 425, 429]);
 
 function isTransient(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const status = (error as { status?: unknown }).status;
-  if (typeof status === "number") return status === 408 || status === 425 || status === 429 || status >= 500;
+  if (typeof status === "number") return TRANSIENT_HTTP_STATUSES.has(status) || status >= SERVER_ERROR_STATUS;
   const cause = (error as { cause?: { code?: unknown } }).cause;
   const code = typeof cause?.code === "string" ? cause.code : "";
   return error instanceof TypeError || /^(?:ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|ETIMEDOUT|UND_ERR_)/.test(code);
@@ -53,9 +56,17 @@ export class TelegramOutbox {
   private loaded?: Promise<void>;
   private tail: Promise<unknown> = Promise.resolve();
   private readonly path: string;
+  private readonly retryBaseDelayMs: number;
+  private readonly retryMaxDelayMs: number;
 
-  constructor(path = DEFAULT_OUTBOX_PATH) {
+  constructor(
+    path = DEFAULT_OUTBOX_PATH,
+    retryBaseDelayMs = DEFAULT_RETRY_BASE_DELAY_MS,
+    retryMaxDelayMs = DEFAULT_RETRY_MAX_DELAY_MS,
+  ) {
     this.path = path;
+    this.retryBaseDelayMs = retryBaseDelayMs;
+    this.retryMaxDelayMs = retryMaxDelayMs;
   }
 
   /** Submit and await one operation. Transient errors retry until success or abort. */
@@ -126,7 +137,8 @@ export class TelegramOutbox {
         return await requester<T>(token, entry.method, entry.body, signal);
       } catch (error) {
         if (!isTransient(error) || signal.aborted) throw error;
-        const delay = Math.min(1000 * 2 ** Math.min(attempt++, 5), RETRY_LIMIT_MS);
+        const maxExponent = Math.max(0, Math.ceil(Math.log2(this.retryMaxDelayMs / this.retryBaseDelayMs)));
+        const delay = Math.min(this.retryBaseDelayMs * 2 ** Math.min(attempt++, maxExponent), this.retryMaxDelayMs);
         await abortableSleep(delay, signal);
       }
     }

@@ -8,32 +8,41 @@ The extension is opt-in: Pi must be started with `--telegram`, `PI_TELEGRAM_ENAB
 
 ## Observable inputs and behavior
 
-- Ordinary Telegram text is delivered to the current Pi session. While Pi or an associated operation is busy, tasks enter a FIFO queue (currently up to 20), can be inspected/cancelled, and dispatch when the session is available.
+- Ordinary Telegram text is delivered to the current Pi session. While Pi or an associated operation is busy, tasks enter a FIFO queue (capacity configurable as `queueCapacity`, default 20), can be inspected/cancelled, and dispatch when the session is available.
 - Supported built-in bot commands and eligible commands exposed by loaded Pi extensions are forwarded to their handlers. Unknown slash commands are rejected rather than sent as ordinary model prompts.
 - Attachments are downloaded into `.telegram-inbox/` in the active project and their paths are included in the task.
 - A reply or Telegram quote includes embedded original text/caption, sender, and quote text in a clearly delimited context block. If the original content is unavailable, that is stated. The plugin does not fetch arbitrary historical messages from Telegram.
 - Messages queued by Telegram while Pi is offline are collected by chat and presented as one explicitly stale batch. Slash commands are excluded and never automatically replayed. After an outage of at least 30 seconds, recovered backlog is handled as stale in the same way. Pi asks whether ordinary stale requests are still relevant before acting.
-- Activity and background-agent state are displayed in Telegram. Background work is integrated through adapters and does not block new input after the parent turn settles.
+- Activity and background-agent state are displayed in Telegram. While a Telegram-originated task is actively processing, the bot sends and refreshes Telegram's typing action; queued tasks do not show typing. Typing stops when the task settles, is cancelled, the session/connection is replaced, or the extension shuts down. API failures are logged and do not block Pi work.
+- The existing Pi activity bubble ends with a local-time-only `Updated: HH:mm` footer, refreshed with the bubble (no date and no clock-only edits). Automatic and `/compact` compaction appear as one activity row transitioning from running to completed/failed; command callbacks and Pi lifecycle events are coalesced. Compaction lifecycle does not generate separate Telegram chat messages; `/compact` refusal/validation replies remain ordinary command responses.
+- Background work is integrated through adapters and does not block new input after the parent turn settles.
 
-## Configuration and current fixed policy values
+## Configuration and policy values
 
-The current documented environment/configuration surface is:
+The environment/flag surface remains:
 
 - `PI_TELEGRAM_BOT_TOKEN`: bot credential.
 - `PI_TELEGRAM_ALLOWED_USER_IDS`: comma-separated numeric allow-list.
 - `PI_TELEGRAM_ENABLED=1` or the `--telegram` flag: opt in at startup; `/telegram on|off` controls the live session.
 
-The following operational values currently live as source constants/defaults rather than user settings. They are recorded here to make the behavior visible; the authoring contract requires classifying and centralizing them before future tuning or refactoring:
+Operator-tunable settings are read from `<PI_CODING_AGENT_DIR>/pi-ad-telegram.json`, defaulting to `~/.pi/agent/pi-ad-telegram.json`. A missing file uses these validated defaults; unknown keys and invalid types/ranges fail with an actionable path-specific error. Relative `outboxPath` resolves under the agent directory. Credentials and authorization inputs remain outside this file.
 
-- Queue capacity: 20 pending tasks.
-- Telegram long-poll timeout: 20 seconds; update pages use Telegram's 100-update API page size.
-- A recovered polling outage becomes stale after 30 seconds.
-- Text chunking uses a 3,500-character internal message limit (below Telegram's service limit).
-- Polling and outbox retries use exponential backoff starting at 1 second and capped at 30 seconds; message outbox applies only to `sendMessage` and `editMessageText`.
-- Background-agent status polling interval: 15 seconds; shutdown activity cleanup timeout: 5 seconds.
-- Background-agent task previews show at most the first 82 characters, followed by an ellipsis when truncated (up to 83 displayed characters); queue listings cap task text at 180 characters; the activity history shows at most 35 entries, with displayed summaries capped at 550 characters. These are current fixed display limits.
+| Setting | Default | Purpose |
+| --- | ---: | --- |
+| `queueCapacity` | 20 | Maximum pending Telegram tasks |
+| `longPollTimeoutSeconds` | 20 | Telegram long-poll timeout |
+| `staleBacklogThresholdMs` | 30000 | Outage duration before recovered messages are stale |
+| `messageChunkLimit` | 3500 | Internal text/HTML chunk target |
+| `retryBaseDelayMs` / `retryMaxDelayMs` | 1000 / 30000 | Polling and outbox retry backoff |
+| `agentBoardRefreshIntervalMs` | 15000 | Background-agent status refresh |
+| `typingRefreshIntervalMs` | 4000 | Typing-action refresh cadence |
+| `commandTimeoutMs` | 120000 | Maximum `/bash` command runtime |
+| `shutdownCleanupTimeoutMs` | 5000 | Activity cleanup bound during shutdown |
+| `activityHistoryLimit` / `activityTextLimit` | 35 / 550 | Activity rows and per-summary text |
+| `queuePreviewLimit` / `backgroundTaskPreviewLimit` | 180 / 82 | Queue and task preview text |
+| `outboxPath` | `<agent-dir>/telegram-outbox.json` | Durable outbound message buffer |
 
-These are current implementation facts, not promises that every value is independently configurable. Future changes must name protocol invariants separately from operator-tunable policy and keep settings centralized and validated.
+Protocol constraints stay fixed and named in code: Telegram long polling accepts at most 50 seconds, update pages at most 100 results, and text messages at most 4096 characters; the typing action expires after about 5 seconds, so its refresh interval must be shorter. The message outbox applies only to `sendMessage` and `editMessageText`. Fixed presentation caps are centralized separately from the operator settings.
 
 ## Outbound delivery and failure behavior
 
@@ -45,14 +54,13 @@ These are current implementation facts, not promises that every value is indepen
 
 ## Interfaces and modularity
 
-`queue.ts`, `message-renderer.ts`, `outbox.ts`, `agent-board.ts`, `reply-context.ts`, and `background-adapters/` own separable responsibilities. `index.ts` currently coordinates the extension, commands, polling, and state; future work should preserve the responsibility boundaries and avoid unbounded growth of the entry point. The user-facing command/API/configuration behavior is the contract; internal function and file names may change if the surface remains compatible.
+`config.ts` loads and validates agent-local settings; `telegram-format.ts` owns command/status summaries; `telegram-activity.ts` renders the shared activity timeline and compaction state; `typing-indicator.ts` manages active-task typing. `queue.ts`, `message-renderer.ts`, `outbox.ts`, `agent-board.ts`, `reply-context.ts`, and `background-adapters/` own their respective responsibilities. `index.ts` composes these modules and coordinates Pi lifecycle, Telegram polling, routing, and shared state. The user-facing command/API/configuration behavior is the contract; internal function and file names may change if the surface remains compatible.
 
 ## Non-goals and known limits
 
 - No webhook or public Telegram endpoint; operation uses long polling.
 - No arbitrary Telegram chat-history retrieval beyond content embedded in a reply/quote update.
 - Stale slash commands are discarded, not executed later.
-- Typing indicators and a time-only “last activity updated” line in the Telegram bubble are not yet part of the current behavior; they are planned follow-up work for the later Telegram refactor.
 - No guarantee of exactly-once delivery after an ambiguous network disconnect.
 
 ## Related contracts

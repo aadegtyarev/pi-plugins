@@ -1,4 +1,6 @@
-export const MAX_QUEUED_TASKS = 20;
+import { DEFAULT_TELEGRAM_SETTINGS } from "./config.ts";
+
+export const MAX_QUEUED_TASKS = DEFAULT_TELEGRAM_SETTINGS.queueCapacity;
 
 export type QueueTaskFinalState = "picked up" | "cancelled";
 export type QueueTaskReaction = "👍" | "👎";
@@ -20,13 +22,22 @@ export interface QueuedTelegramTask {
 export class TelegramTaskQueue {
   private readonly tasks: QueuedTelegramTask[] = [];
   private nextId = 1;
+  private capacity: number;
+
+  constructor(capacity = DEFAULT_TELEGRAM_SETTINGS.queueCapacity) {
+    this.capacity = capacity;
+  }
+
+  setCapacity(capacity: number): void {
+    this.capacity = capacity;
+  }
 
   get length(): number {
     return this.tasks.length;
   }
 
   enqueue(chatId: number, text: string, replyToMessageId?: number): QueuedTelegramTask | undefined {
-    if (this.tasks.length >= MAX_QUEUED_TASKS) return undefined;
+    if (this.tasks.length >= this.capacity) return undefined;
     const task: QueuedTelegramTask = {
       id: `${Date.now().toString(36)}-${this.nextId++}`,
       chatId,
@@ -61,9 +72,9 @@ export class TelegramTaskQueue {
   }
 }
 
-export function formatQueueListing(tasks: QueuedTelegramTask[]): string {
+export function formatQueueListing(tasks: QueuedTelegramTask[], previewLimit = DEFAULT_TELEGRAM_SETTINGS.queuePreviewLimit): string {
   if (tasks.length === 0) return "Your task queue is empty.";
-  const rows = tasks.map((task) => `• ID \`${task.id}\`: ${task.text.replace(/\s+/g, " ").slice(0, 180)}`);
+  const rows = tasks.map((task) => `• ID \`${task.id}\`: ${task.text.replace(/\s+/g, " ").slice(0, previewLimit)}`);
   return `You have ${tasks.length} queued task(s):\n${rows.join("\n")}\n\nRemove a task: /queue_cancel <ID>`;
 }
 
