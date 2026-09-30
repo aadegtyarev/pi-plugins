@@ -2,6 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { installBackgroundAdapters } from "./background-adapters/index.ts";
 import type { BackgroundWorkEvent } from "./background-adapters/types.ts";
 import { AgentBoardPublisher, BackgroundAgentBatch } from "./agent-board.ts";
@@ -9,6 +10,9 @@ import { TelegramCommandRegistry } from "./command-registry.ts";
 import { getPluginTelegramCommand, getTelegramCommandMenu, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
 import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, reactionForQueueTask, TelegramTaskQueue, type QueueTaskFinalState, type QueuedTelegramTask } from "./queue.ts";
 import { editTelegramMessage, escapeHtml, MAX_TELEGRAM_MESSAGE_LENGTH as MAX_MESSAGE_LENGTH, sendTelegramMessage } from "./message-renderer.ts";
+import { TelegramOutbox } from "./outbox.ts";
+import { formatTelegramReplyContext } from "./reply-context.ts";
+import { isTelegramSlashCommand } from "./stale-messages.ts";
 
 const TELEGRAM_API = "https://api.telegram.org";
 const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -16,6 +20,9 @@ type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
 interface TelegramUser {
   id: number;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
 }
 
 interface TelegramChat {
@@ -37,6 +44,9 @@ interface TelegramMessage {
   document?: TelegramFile;
   photo?: TelegramFile[];
   caption?: string;
+  date?: number;
+  quote?: { text?: string; position?: number };
+  reply_to_message?: TelegramMessage;
   media_group_id?: string;
 }
 
@@ -57,7 +67,24 @@ interface TelegramResponse<T> {
   description?: string;
 }
 
+interface BufferedTelegramRequest { method: string; body: Record<string, unknown>; }
+
+const telegramOutbox = new TelegramOutbox();
+const BUFFERED_TELEGRAM_METHODS = new Set(["sendMessage", "editMessageText"]);
+
 async function telegramRequest<T>(
+  token: string,
+  method: string,
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (BUFFERED_TELEGRAM_METHODS.has(method)) {
+    return telegramOutbox.request<T>(token, method, body, signal, telegramRequestDirect);
+  }
+  return telegramRequestDirect<T>(token, method, body, signal);
+}
+
+async function telegramRequestDirect<T>(
   token: string,
   method: string,
   body: Record<string, unknown>,
@@ -787,6 +814,9 @@ export default function (pi: ExtensionAPI) {
     }
     botToken = token;
     controller = nextController;
+    void telegramOutbox.replay(token, nextController.signal, telegramRequestDirect).catch((error) => {
+      if (!nextController.signal.aborted) console.error("[pi-ad-telegram] Failed to replay Telegram outbox:", error);
+    });
     pollTask = pollTelegram(token, allowedIds, nextController.signal).catch((error) => {
       if (!nextController.signal.aborted) console.error("[pi-ad-telegram] Polling stopped:", error);
     });
@@ -1138,7 +1168,8 @@ export default function (pi: ExtensionAPI) {
       .map((item) => item.message?.text?.trim() ?? item.message?.caption?.trim() ?? "")
       .find(Boolean) ?? "";
     const hasAttachments = groupedUpdates.some((item) => item.message?.document || item.message?.photo?.length);
-    if (!message || (!text && !hasAttachments) || message.chat.type !== "private") return;
+    const replyContext = message ? formatTelegramReplyContext(message) : "";
+    if (!message || (!text && !hasAttachments && !replyContext) || message.chat.type !== "private") return;
 
     const allowedIds = splitAllowedIds(process.env.PI_TELEGRAM_ALLOWED_USER_IDS);
     if (!message.from || !allowedIds.has(message.from.id)) return;
@@ -1205,7 +1236,7 @@ export default function (pi: ExtensionAPI) {
       await reply(chatId, "The Pi session is not ready yet. Please try again later.", signal);
       return;
     }
-    const taskText = `${text || "Please inspect the attached file."}${incomingAttachment}`;
+    const taskText = `${text || (hasAttachments ? "Please inspect the attached file." : "Please respond to the message I replied to.")}${incomingAttachment}${replyContext}`;
     if (!ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined || drainingQueue) {
       const task = queuedTasks.enqueue(chatId, taskText, message.message_id);
       if (!task) {
@@ -1239,31 +1270,94 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  async function dispatchStaleBatch(updates: TelegramUpdate[], signal: AbortSignal): Promise<void> {
+    if (!currentContext) return;
+    const byChat = new Map<number, string[]>();
+    for (const { message } of updates) {
+      if (!message || message.chat.type !== "private") continue;
+      const body = message.text ?? message.caption ?? (message.photo ? "[photo attachment]" : "[non-text message]");
+      if (isTelegramSlashCommand(body)) continue;
+      const messages = byChat.get(message.chat.id) ?? [];
+      messages.push(`• ${body}`);
+      byChat.set(message.chat.id, messages);
+    }
+    for (const [chatId, messages] of byChat) {
+      const task = `The following Telegram messages arrived while Pi was offline. They are STALE; do not carry out their requests or commands yet. Present them together and ask the user whether they are still relevant.\n\n${messages.join("\n")}`;
+      if (isSessionBusy(currentContext) || drainingQueue) {
+        const queued = queuedTasks.enqueue(chatId, task);
+        if (!queued) {
+          await reply(chatId, `Offline batch not queued: the Telegram task queue is full (maximum ${MAX_QUEUED_TASKS}).`, signal);
+          continue;
+        }
+        await sendQueuedTask(chatId, queued, signal);
+      } else {
+        await dispatchTask(chatId, task, currentContext, signal);
+      }
+    }
+  }
+
   async function pollTelegram(token: string, allowedIds: Set<number>, signal: AbortSignal): Promise<void> {
     let offset = 0;
     let initialized = false;
     let failures = 0;
+    let networkFailureStartedAt: number | undefined;
+    let staleBacklog = false;
+    let stalePending: TelegramUpdate[] = [];
+    let startupPending: TelegramUpdate[] = [];
+    let startupScanOffset = 0;
     while (!signal.aborted) {
       try {
         if (!initialized) {
-          // Skip updates accumulated while Pi was offline, so old commands are not replayed on startup.
-          const pending = await telegramRequest<TelegramUpdate[]>(
-            token,
-            "getUpdates",
-            { offset: -1, timeout: 0, allowed_updates: ["message", "callback_query"] },
-            signal,
-          );
-          if (pending.length > 0) offset = pending[pending.length - 1].update_id + 1;
+          // Begin at the oldest unacknowledged update so offline messages can be presented together.
+          let page: TelegramUpdate[];
+          do {
+            page = await telegramRequest<TelegramUpdate[]>(
+              token,
+              "getUpdates",
+              { offset: startupScanOffset, timeout: 0, allowed_updates: ["message", "callback_query"] },
+              signal,
+            );
+            if (page.length > 0) {
+              startupPending.push(...page);
+              startupScanOffset = page[page.length - 1]!.update_id + 1;
+            }
+          } while (page.length >= 100 && !signal.aborted);
+          offset = startupScanOffset;
+          const stale = startupPending.filter((update) => update.message?.chat.type === "private" && allowedIds.has(update.message.from?.id ?? -1));
+          startupPending = [];
+          if (stale.length > 0) await dispatchStaleBatch(stale, signal);
           initialized = true;
         }
         // Keep the long poll bounded; transient network/header timeouts are retried below.
-        const updates = await telegramRequest<TelegramUpdate[]>(
+        let updates = await telegramRequest<TelegramUpdate[]>(
           token,
           "getUpdates",
           { offset, timeout: 20, allowed_updates: ["message", "callback_query"] },
           signal,
         );
+        staleBacklog ||= networkFailureStartedAt !== undefined && Date.now() - networkFailureStartedAt >= 30_000;
+        const staleReconnectBatch = staleBacklog;
         failures = 0;
+        networkFailureStartedAt = undefined;
+        if (staleBacklog) {
+          stalePending.push(...updates);
+          if (updates.length > 0) offset = updates[updates.length - 1]!.update_id + 1;
+          while (updates.length >= 100 && !signal.aborted) {
+            updates = await telegramRequest<TelegramUpdate[]>(
+              token,
+              "getUpdates",
+              { offset, timeout: 0, allowed_updates: ["message", "callback_query"] },
+              signal,
+            );
+            if (updates.length > 0) {
+              stalePending.push(...updates);
+              offset = updates[updates.length - 1]!.update_id + 1;
+            }
+          }
+          updates = stalePending;
+          stalePending = [];
+          staleBacklog = false;
+        }
         const mediaGroups = new Map<string, TelegramUpdate[]>();
         for (const update of updates) {
           offset = update.update_id + 1;
@@ -1276,7 +1370,14 @@ export default function (pi: ExtensionAPI) {
           }
         }
         const handledGroups = new Set<string>();
+        const staleBatch = staleReconnectBatch;
+        if (staleBatch) {
+          const stale = updates.filter((update) => update.message?.chat.type === "private" && allowedIds.has(update.message.from?.id ?? -1));
+          if (stale.length > 0) await dispatchStaleBatch(stale, signal);
+          if (updates.length < 100) staleBacklog = false;
+        }
         for (const update of updates) {
+          if (staleBatch && update.message && allowedIds.has(update.message.from?.id ?? -1)) continue;
           if (update.callback_query) {
             await handleQueueCallback(update, signal);
             continue;
@@ -1310,6 +1411,7 @@ export default function (pi: ExtensionAPI) {
         }
         // Keep the offset unchanged and retry transient polling/network failures with capped exponential backoff.
         failures++;
+        networkFailureStartedAt ??= Date.now();
         const retryDelay = Math.min(1000 * 2 ** Math.min(failures - 1, 5), 30_000);
         console.warn(`[pi-ad-telegram] Telegram polling request failed; retrying in ${retryDelay / 1000}s (attempt ${failures}).`, error);
         await sleep(retryDelay, signal);
