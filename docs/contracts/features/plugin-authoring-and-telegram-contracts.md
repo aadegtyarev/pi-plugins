@@ -1,6 +1,6 @@
 # Feature contract: plugin authoring and Telegram surfaces
 
-- **Status:** implementing
+- **Status:** complete
 - **Approved:** 2026-09-29
 - **Goal:** Record durable contracts for authoring Pi extensions in this repository and for the existing `pi-ad-telegram` surface, then commit the accumulated requested work and publish the repository to a private MIT-licensed GitHub remote.
 - **Affected surfaces:** [Pi extension authoring](../surfaces/pi-extension-authoring.md) and [Telegram bridge](../surfaces/pi-ad-telegram.md), both introduced by this task.
@@ -33,12 +33,12 @@
 - The Telegram contract clearly identifies values currently hard-coded in code as current behavior, not as a promise that they are configurable.
 - `npm test`, `npm run typecheck`, and `git diff --check` pass before commit.
 - A read-only reviewer reports no unresolved actionable contract/diff findings.
-- The repo has two logical commits (Telegram code/tests; repo preparation/contracts/license), the GitHub remote is private, `origin` is configured, and pushed history matches the current local branch.
+- Telegram code/tests and repository preparation/contracts/license are kept in separate logical commits; the GitHub remote is private, `origin` is configured, and pushed history matches the current local branch.
 - The working tree is clean after push.
 
 ## Validation
 
-- Run `npm test`, `npm run typecheck`, and `git diff --check`.
-- Review both contracts against current source and README.
-- Verify remote visibility, `origin`, and pushed commit SHA.
-- Verify final Git status is clean and no token, inbox, or dependency artifacts were committed.
+- `npm test`: passed (26 tests); `npm run typecheck`: passed; `git diff --cached --check`: passed.
+- Independent read-only review found one low-severity truncation-limit detail; it was corrected and the final review reported no remaining actionable findings.
+- Verified remote visibility is `PRIVATE`, GitHub reports the `MIT License`, `origin` is configured, and local `HEAD` matches `origin/master` (`7b441abd56848e710acadaf7b4d9a70af351381c`).
+- Final Git status is clean; no token, inbox, or dependency artifacts were committed.
