@@ -360,7 +360,7 @@ test("Telegram polling covers busy and successful session-command paths with the
     await events.get("session_start")?.({}, ctx);
     const minimumResponses = 15;
     const deadline = Date.now() + 5000;
-    while ((sent.length < minimumResponses || userMessages.length < 2 || nextUpdate < updates.length) && Date.now() < deadline) {
+    while ((sent.length < minimumResponses || userMessages.length < 3 || nextUpdate < updates.length) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
