@@ -140,6 +140,8 @@ export default function (pi: ExtensionAPI) {
   let pendingSessionUsageReportChatId: number | undefined;
   let telegramRunChatId: number | undefined;
   let pendingTelegramRunChatId: number | undefined;
+  const pendingBackgroundSummaryRoutes: Array<{ runId: string; chatId: number; prompt: string }> = [];
+  let activeBackgroundSummaryRoute: { runId: string; chatId: number; prompt: string } | undefined;
   let activeBashChatId: number | undefined;
   let activeCompactChatId: number | undefined;
   let activeCompactActivityId: string | undefined;
@@ -169,6 +171,11 @@ export default function (pi: ExtensionAPI) {
   const backgroundAgents = new BackgroundAgentBatch();
   const backgroundAgentLaunches = new Map<string, { chatId: number; agent: string }>();
   const toolCalls = new Map<string, TelegramActivityTool>();
+
+  function clearPendingBackgroundSummaryRoute(route: { runId: string; chatId: number; prompt: string }): void {
+    const index = pendingBackgroundSummaryRoutes.indexOf(route);
+    if (index >= 0) pendingBackgroundSummaryRoutes.splice(index, 1);
+  }
 
   function createTypingIndicator(): TelegramTypingIndicator {
     return new TelegramTypingIndicator(async (chatId, signal) => {
@@ -565,6 +572,8 @@ export default function (pi: ExtensionAPI) {
     pendingSessionUsageReportChatId = undefined;
     telegramRunChatId = undefined;
     pendingTelegramRunChatId = undefined;
+    pendingBackgroundSummaryRoutes.length = 0;
+    activeBackgroundSummaryRoute = undefined;
     activityWorking = false;
     currentThinking = "";
     currentThinkingEntry = undefined;
@@ -1128,6 +1137,8 @@ export default function (pi: ExtensionAPI) {
     pendingSessionUsageReportChatId = undefined;
     telegramRunChatId = undefined;
     pendingTelegramRunChatId = undefined;
+    pendingBackgroundSummaryRoutes.length = 0;
+    activeBackgroundSummaryRoute = undefined;
     compactionActivity.reset();
     activeCompactChatId = undefined;
     activeCompactActivityId = undefined;
@@ -1295,19 +1306,27 @@ export default function (pi: ExtensionAPI) {
         const signal = controller.signal;
         const agent = event.agent ?? entry?.agent ?? launch?.agent ?? "subagent";
         const state = event.status === "stopped" ? "stopped" : event.status === "failed" ? "failed" : "completed";
+        // Queue the Pi nudge before Telegram board I/O. During agent_settled, Pi can report idle but defer
+        // the prompt until all settled handlers finish; its next-turn route must already be installed.
+        const nudge = `Background agent ${agent} ${state} (run ID: ${event.id}). The user is waiting for a brief summary in English. Check the run status using the subagent tool for ID ${event.id}; summarize the result in your own words and do not copy the internal acceptance report or raw report.`;
+        const startsIdleRun = currentContext?.isIdle() === true;
+        const summaryRoute = startsIdleRun ? { runId: event.id, chatId, prompt: nudge } : undefined;
+        if (summaryRoute) pendingBackgroundSummaryRoutes.push(summaryRoute);
+        const onQueueError = (error: unknown) => {
+          if (summaryRoute) clearPendingBackgroundSummaryRoute(summaryRoute);
+          console.error("[pi-ad-telegram] Failed to queue subagent summary:", error);
+        };
+        try {
+          pi.sendUserMessage(nudge, startsIdleRun ? undefined : { deliverAs: "followUp" });
+        } catch (error) {
+          onQueueError(error);
+        }
         const activityId = `background:${event.id}`;
         toolCalls.set(activityId, { summary: `🤖 Agent ${agent} ${state}`, status: event.status === "failed" ? "failed" : "done" });
         activityOrder.push({ type: "tool", id: activityId });
-        if (entry) await refreshAgentBoard(chatId, signal);
+        if (entry) void refreshAgentBoard(chatId, signal);
         activityWorking = currentContext ? !currentContext.isIdle() : false;
         void refreshActivity(chatId, signal);
-        // Don't dump a child report into the chat. Wake Pi so it can inspect the run and send a concise synthesis.
-        const nudge = `Background agent ${agent} ${state} (run ID: ${event.id}). The user is waiting for a brief summary in English. Check the run status using the subagent tool for ID ${event.id}; summarize the result in your own words and do not copy the internal acceptance report or raw report.`;
-        try {
-          pi.sendUserMessage(nudge, currentContext?.isIdle() ? undefined : { deliverAs: "followUp" });
-        } catch (error) {
-          console.error("[pi-ad-telegram] Failed to queue subagent summary:", error);
-        }
       }
       backgroundAgentLaunches.delete(event.id);
     }).catch((error) => console.error("[pi-ad-telegram] Failed to process background-agent event:", error));
@@ -1358,7 +1377,16 @@ export default function (pi: ExtensionAPI) {
     finishCompactionActivity(id, chatId, "failed", `🧹 Context compaction failed${details}`, controller.signal);
   });
 
+  pi.on("before_agent_start", (event) => {
+    const routeIndex = pendingBackgroundSummaryRoutes.findIndex((route) => route.prompt === event.prompt);
+    activeBackgroundSummaryRoute = routeIndex < 0 ? undefined : pendingBackgroundSummaryRoutes.splice(routeIndex, 1)[0];
+    if (!activeBackgroundSummaryRoute) return;
+    sessionUsageReportChatId = activeBackgroundSummaryRoute.chatId;
+    telegramRunChatId = activeBackgroundSummaryRoute.chatId;
+  });
+
   pi.on("agent_start", () => {
+    if (activeBackgroundSummaryRoute) return;
     if (pendingSessionUsageReportChatId !== undefined) sessionUsageReportChatId = pendingSessionUsageReportChatId;
     else if (telegramRunChatId === undefined) sessionUsageReportChatId = undefined;
     pendingSessionUsageReportChatId = undefined;
@@ -1415,7 +1443,10 @@ export default function (pi: ExtensionAPI) {
       activeChatId = undefined;
     }
     telegramRunChatId = undefined;
-    pendingTelegramRunChatId = undefined;
+    activeBackgroundSummaryRoute = undefined;
+    if (pendingBackgroundSummaryRoutes.length === 0) pendingTelegramRunChatId = undefined;
+    // Summary nudges submitted during agent_settled start after settled handlers finish.
+    // Their routes are matched by exact prompt so nested deferred starts cannot reorder destinations.
     // Telegram tasks can also be waiting behind work started from the TUI/API.
   });
 
@@ -1428,6 +1459,8 @@ export default function (pi: ExtensionAPI) {
     pendingSessionUsageReportChatId = undefined;
     telegramRunChatId = undefined;
     pendingTelegramRunChatId = undefined;
+    pendingBackgroundSummaryRoutes.length = 0;
+    activeBackgroundSummaryRoute = undefined;
     bashController?.abort();
     await activityQueue;
     if (activityChat !== undefined && botToken) await deleteActivity(activityChat, AbortSignal.timeout(settings.shutdownCleanupTimeoutMs));
