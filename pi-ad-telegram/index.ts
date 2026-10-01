@@ -7,7 +7,6 @@ import type { BackgroundWorkEvent } from "./background-adapters/types.ts";
 import { AgentBoardPublisher, BackgroundAgentBatch } from "./agent-board.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
 import { getPluginTelegramCommand, getTelegramCommandMenu, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
-import { finalizeQueueNotice, formatQueueListing, parseQueueCancelId, TelegramTaskQueue, type QueueTaskFinalState, type QueuedTelegramTask } from "./queue.ts";
 import { editTelegramMessage, escapeHtml, sendTelegramMessage } from "./message-renderer.ts";
 import { TelegramOutbox } from "./outbox.ts";
 import { formatTelegramReplyContext } from "./reply-context.ts";
@@ -55,12 +54,6 @@ interface TelegramMessage {
 interface TelegramUpdate {
   update_id: number;
   message?: TelegramMessage;
-  callback_query?: {
-    id: string;
-    from: TelegramUser;
-    data?: string;
-    message?: { message_id: number; chat: TelegramChat };
-  };
 }
 
 interface TelegramResponse<T> {
@@ -143,7 +136,6 @@ export default function (pi: ExtensionAPI) {
   let typingIndicator = createTypingIndicator();
   const compactionActivity = new CompactionActivityLifecycle();
   let activeChatId: number | undefined;
-  let lastTelegramChatId: number | undefined;
   let sessionUsageReportChatId: number | undefined;
   let pendingSessionUsageReportChatId: number | undefined;
   let telegramRunChatId: number | undefined;
@@ -154,9 +146,7 @@ export default function (pi: ExtensionAPI) {
   let pendingNewChatId: number | undefined;
   let bashController: AbortController | undefined;
   let cancelRequested = false;
-  const queuedTasks = new TelegramTaskQueue(settings.queueCapacity);
   let settingsLoadError: unknown;
-  let drainingQueue = false;
   let lastAssistantText = "";
   const activityMessageIds: number[] = [];
   const activityTexts: string[] = [];
@@ -265,8 +255,6 @@ export default function (pi: ExtensionAPI) {
         if (chatId !== undefined && controller) {
           await reply(chatId, `Failed to create a session: ${String(error)}`, controller.signal);
         }
-      } finally {
-        void drainQueuedTasks();
       }
     },
   });
@@ -295,16 +283,6 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  async function sendQueuedTask(chatId: number, task: QueuedTelegramTask, signal: AbortSignal): Promise<void> {
-    if (!botToken) return;
-    const [messageId] = await sendTelegramMessage(telegramRequest, botToken, chatId, {
-      text: `✅ Added to the queue · ID ${task.id}\nView: /queue · remove: /queue_cancel ${task.id}`,
-      replyToMessageId: task.replyToMessageId,
-      replyMarkup: { inline_keyboard: [[{ text: "Remove from queue", callback_data: `queue-remove:${task.id}` }]] },
-    }, signal, settings.messageChunkLimit);
-    task.noticeMessageId = messageId;
-  }
-
   async function markSteeringSubmission(chatId: number, messageId: number | undefined, signal: AbortSignal): Promise<void> {
     if (!botToken || messageId === undefined || signal.aborted) return;
     try {
@@ -319,37 +297,9 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  async function closeQueuedTask(task: QueuedTelegramTask, state: QueueTaskFinalState, emoji: "✅" | "❌", signal: AbortSignal): Promise<void> {
-    if (!botToken || task.noticeMessageId === undefined) return;
-    await finalizeQueueNotice({
-      signal,
-      editNotice: () => editTelegramMessage(telegramRequest, botToken!, task.chatId, task.noticeMessageId!, {
-        text: `${emoji} Task ${task.id} ${state}.`,
-        replyMarkup: { inline_keyboard: [] },
-      }, signal, settings.messageChunkLimit),
-      onError: () => {
-        if (!signal.aborted) console.error("[pi-ad-telegram] Failed to update queued-task status.");
-      },
-    });
-  }
-
   const commandRegistry = new TelegramCommandRegistry<{ chatId: number; signal: AbortSignal; ctx: ExtensionContext | undefined }>();
   commandRegistry.register("start", async ({ chatId, signal }) => {
-    await reply(chatId, telegramHelpText(pi.getCommands(), settings.queueCapacity), signal);
-  });
-  commandRegistry.register("queue", async ({ chatId, signal }) => {
-    await reply(chatId, formatQueueListing(queuedTasks.listForChat(chatId), settings.queuePreviewLimit), signal, true);
-  });
-  commandRegistry.register("queue_cancel", async ({ chatId, signal }, args) => {
-    const id = parseQueueCancelId(args);
-    const removed = id ? queuedTasks.remove(id, chatId) : undefined;
-    if (!removed) await reply(chatId, "That task was not found in your queue. See IDs with /queue.", signal);
-    else await closeQueuedTask(removed, "cancelled", "❌", signal);
-  });
-  commandRegistry.register("clear_queue", async ({ chatId, signal }) => {
-    const chatTasks = queuedTasks.removeAllForChat(chatId);
-    for (const task of chatTasks) await closeQueuedTask(task, "cancelled", "❌", signal);
-    await reply(chatId, `Queue cleared; removed ${chatTasks.length} task(s).`, signal);
+    await reply(chatId, telegramHelpText(pi.getCommands()), signal);
   });
   commandRegistry.register("agents", async ({ chatId, signal }) => {
     if (!backgroundAgents.hasRunning()) {
@@ -556,26 +506,6 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  async function handleQueueCallback(update: TelegramUpdate, signal: AbortSignal): Promise<void> {
-    const query = update.callback_query;
-    if (!query) return;
-    const chatId = query.message?.chat.id;
-    const messageId = query.message?.message_id;
-    const allowed = query.message?.chat.type === "private" && splitAllowedIds(process.env.PI_TELEGRAM_ALLOWED_USER_IDS).has(query.from.id);
-    const callback = query.data?.startsWith("queue-remove:") ? query.data.slice("queue-remove:".length) : "";
-    let notification = "This button has expired.";
-    if (allowed && chatId !== undefined && messageId !== undefined && callback) {
-      const removed = queuedTasks.remove(callback, chatId);
-      if (removed) {
-        notification = `Task ${removed.id} was cancelled.`;
-        await closeQueuedTask(removed, "cancelled", "❌", signal);
-      } else if (query.data?.startsWith("queue-remove:")) {
-        notification = "This task is no longer in the queue.";
-      }
-    }
-    await telegramRequest<unknown>(botToken!, "answerCallbackQuery", { callback_query_id: query.id, text: notification }, signal);
-  }
-
   async function startTelegram(ctx: ExtensionContext): Promise<boolean> {
     if (controller && !controller.signal.aborted) return true;
     if (settingsLoadError) {
@@ -631,7 +561,6 @@ export default function (pi: ExtensionAPI) {
       botToken = undefined;
     }
     activeChatId = undefined;
-    lastTelegramChatId = undefined;
     sessionUsageReportChatId = undefined;
     pendingSessionUsageReportChatId = undefined;
     telegramRunChatId = undefined;
@@ -870,7 +799,6 @@ export default function (pi: ExtensionAPI) {
       activeCompactActivityId = undefined;
       if (activeCompactChatId === chatId) {
         activeCompactChatId = undefined;
-        void drainQueuedTasks();
       }
     }
   }
@@ -921,23 +849,7 @@ export default function (pi: ExtensionAPI) {
       if (bashController === taskController) {
         bashController = undefined;
         activeBashChatId = undefined;
-        void drainQueuedTasks();
       }
-    }
-  }
-
-  async function drainQueuedTasks(): Promise<void> {
-    const ctx = currentContext;
-    if (drainingQueue || !ctx || !ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined) return;
-    const task = queuedTasks.takeNext();
-    if (!task) return;
-    drainingQueue = true;
-    try {
-      const signal = controller?.signal ?? new AbortController().signal;
-      await closeQueuedTask(task, "picked up", "✅", signal);
-      await dispatchTask(task.chatId, task.text, ctx, signal);
-    } finally {
-      drainingQueue = false;
     }
   }
 
@@ -958,7 +870,6 @@ export default function (pi: ExtensionAPI) {
     if (!message.from || !allowedIds.has(message.from.id)) return;
 
     const chatId = message.chat.id;
-    lastTelegramChatId = chatId;
     let incomingAttachment = "";
     const attachments = groupedUpdates.flatMap((groupUpdate) => {
       const item = groupUpdate.message;
@@ -997,13 +908,8 @@ export default function (pi: ExtensionAPI) {
     const pluginCommand = command && ctx ? getPluginTelegramCommand(command, pi.getCommands()) : undefined;
     if (pluginCommand && ctx) {
       const taskText = `/${pluginCommand.piCommand}${args ? ` ${args}` : ""}`;
-      if (!ctx.isIdle() || activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined || drainingQueue) {
-        const task = queuedTasks.enqueue(chatId, taskText, message.message_id);
-        if (!task) {
-          await reply(chatId, `Queue is full (maximum ${settings.queueCapacity} tasks). The command was not added; try again later or use /clear_queue.`, signal);
-          return;
-        }
-        await sendQueuedTask(chatId, task, signal);
+      if (isSessionBusy(ctx)) {
+        await reply(chatId, "Pi is busy and cannot handle this slash command now. It was not queued; please send it again when Pi is ready.", signal);
         return;
       }
       await dispatchTask(chatId, taskText, ctx, signal);
@@ -1020,6 +926,10 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const taskText = `${text || (hasAttachments ? "Please inspect the attached file." : "Please respond to the message I replied to.")}${incomingAttachment}${replyContext}`;
+    if (activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined) {
+      await reply(chatId, "Pi is temporarily unable to accept this message. It was not queued; please try again when Pi is ready.", signal);
+      return;
+    }
     if (!ctx.isIdle()) {
       try {
         pi.sendUserMessage(taskText, { expandPromptTemplates: true, deliverAs: "steer" });
@@ -1028,17 +938,14 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       sessionUsageReportChatId = chatId;
+      pendingSessionUsageReportChatId = chatId;
       telegramRunChatId = chatId;
+      pendingTelegramRunChatId = chatId;
       void markSteeringSubmission(chatId, message.message_id, signal);
       return;
     }
-    if (activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined || drainingQueue) {
-      const task = queuedTasks.enqueue(chatId, taskText, message.message_id);
-      if (!task) {
-        await reply(chatId, `Queue is full (maximum ${settings.queueCapacity} tasks). The task was not added; try again later or use /clear_queue.`, signal);
-        return;
-      }
-      await sendQueuedTask(chatId, task, signal);
+    if (activeChatId !== undefined || activeBashChatId !== undefined || activeCompactChatId !== undefined || pendingNewChatId !== undefined) {
+      await reply(chatId, "Pi is temporarily unable to accept this message. It was not queued; please try again when Pi is ready.", signal);
       return;
     }
 
@@ -1062,7 +969,7 @@ export default function (pi: ExtensionAPI) {
     try {
       void refreshActivity(chatId, signal);
       if (signal.aborted) return;
-      pi.sendUserMessage(taskText, { expandPromptTemplates: true });
+      pi.sendUserMessage(taskText, { expandPromptTemplates: true, deliverAs: "steer" });
     } catch (error) {
       typingIndicator.stop();
       activeChatId = undefined;
@@ -1071,7 +978,6 @@ export default function (pi: ExtensionAPI) {
       if (telegramRunChatId === chatId) telegramRunChatId = undefined;
       if (pendingTelegramRunChatId === chatId) pendingTelegramRunChatId = undefined;
       await reply(chatId, `Failed to send the task to Pi: ${String(error)}`, signal);
-      void drainQueuedTasks();
     }
   }
 
@@ -1088,13 +994,8 @@ export default function (pi: ExtensionAPI) {
     }
     for (const [chatId, messages] of byChat) {
       const task = `The following Telegram messages arrived while Pi was offline. They are STALE; do not carry out their requests or commands yet. Present them together and ask the user whether they are still relevant.\n\n${messages.join("\n")}`;
-      if (isSessionBusy(currentContext) || drainingQueue) {
-        const queued = queuedTasks.enqueue(chatId, task);
-        if (!queued) {
-          await reply(chatId, `Offline batch not queued: the Telegram task queue is full (maximum ${settings.queueCapacity}).`, signal);
-          continue;
-        }
-        await sendQueuedTask(chatId, queued, signal);
+      if (isSessionBusy(currentContext)) {
+        await reply(chatId, "A stale Telegram batch cannot be submitted because Pi is busy. The batch was not queued; send any still-relevant requests again when Pi is ready.", signal);
       } else {
         await dispatchTask(chatId, task, currentContext, signal);
       }
@@ -1119,7 +1020,7 @@ export default function (pi: ExtensionAPI) {
             page = await telegramRequest<TelegramUpdate[]>(
               token,
               "getUpdates",
-              { offset: startupScanOffset, timeout: 0, allowed_updates: ["message", "callback_query"] },
+              { offset: startupScanOffset, timeout: 0, allowed_updates: ["message"] },
               signal,
             );
             if (page.length > 0) {
@@ -1137,7 +1038,7 @@ export default function (pi: ExtensionAPI) {
         let updates = await telegramRequest<TelegramUpdate[]>(
           token,
           "getUpdates",
-          { offset, timeout: settings.longPollTimeoutSeconds, allowed_updates: ["message", "callback_query"] },
+          { offset, timeout: settings.longPollTimeoutSeconds, allowed_updates: ["message"] },
           signal,
         );
         staleBacklog ||= networkFailureStartedAt !== undefined && Date.now() - networkFailureStartedAt >= settings.staleBacklogThresholdMs;
@@ -1151,7 +1052,7 @@ export default function (pi: ExtensionAPI) {
             updates = await telegramRequest<TelegramUpdate[]>(
               token,
               "getUpdates",
-              { offset, timeout: 0, allowed_updates: ["message", "callback_query"] },
+              { offset, timeout: 0, allowed_updates: ["message"] },
               signal,
             );
             if (updates.length > 0) {
@@ -1183,10 +1084,6 @@ export default function (pi: ExtensionAPI) {
         }
         for (const update of updates) {
           if (staleBatch && update.message && allowedIds.has(update.message.from?.id ?? -1)) continue;
-          if (update.callback_query) {
-            await handleQueueCallback(update, signal);
-            continue;
-          }
           const message = update.message;
           if (!allowedIds.has(message?.from?.id ?? -1)) continue;
           const groupId = message?.media_group_id;
@@ -1239,7 +1136,6 @@ export default function (pi: ExtensionAPI) {
       settings = await loadTelegramSettings();
       settingsLoadError = undefined;
       typingIndicator = createTypingIndicator();
-      queuedTasks.setCapacity(settings.queueCapacity);
       telegramOutbox = new TelegramOutbox(settings.outboxPath, settings.retryBaseDelayMs, settings.retryMaxDelayMs);
     } catch (error) {
       settingsLoadError = error;
@@ -1463,11 +1359,11 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", () => {
-    if (pendingSessionUsageReportChatId === undefined) sessionUsageReportChatId = undefined;
-    else sessionUsageReportChatId ??= pendingSessionUsageReportChatId;
+    if (pendingSessionUsageReportChatId !== undefined) sessionUsageReportChatId = pendingSessionUsageReportChatId;
+    else if (telegramRunChatId === undefined) sessionUsageReportChatId = undefined;
     pendingSessionUsageReportChatId = undefined;
-    if (pendingTelegramRunChatId === undefined) telegramRunChatId = undefined;
-    else telegramRunChatId ??= pendingTelegramRunChatId;
+    if (pendingTelegramRunChatId !== undefined) telegramRunChatId = pendingTelegramRunChatId;
+    else if (telegramRunChatId === undefined) telegramRunChatId = undefined;
     pendingTelegramRunChatId = undefined;
   });
 
@@ -1503,7 +1399,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_settled", async () => {
     typingIndicator.stop();
     const activityTargetChatId = activeChatId;
-    const chatId = telegramRunChatId ?? activeChatId ?? lastTelegramChatId;
+    const chatId = telegramRunChatId ?? activeChatId;
     if (chatId !== undefined && botToken && controller) {
       const text = lastAssistantText || "Pi completed the task without a text response.";
       const message = cancelRequested ? `Task stopped.\n\n${text}` : text;
@@ -1521,7 +1417,6 @@ export default function (pi: ExtensionAPI) {
     telegramRunChatId = undefined;
     pendingTelegramRunChatId = undefined;
     // Telegram tasks can also be waiting behind work started from the TUI/API.
-    void drainQueuedTasks();
   });
 
   pi.on("session_shutdown", async () => {
@@ -1541,7 +1436,6 @@ export default function (pi: ExtensionAPI) {
     botToken = undefined;
     currentContext = undefined;
     activeChatId = undefined;
-    lastTelegramChatId = undefined;
     activeBashChatId = undefined;
     activeCompactChatId = undefined;
     activeCompactActivityId = undefined;

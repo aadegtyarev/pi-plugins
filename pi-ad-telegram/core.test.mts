@@ -6,7 +6,6 @@ import test from "node:test";
 import { AgentBoardPublisher, type AgentBoardTransport, BackgroundAgentBatch } from "./agent-board.ts";
 import { getPluginTelegramCommand, getPluginTelegramCommands, getTelegramCommandMenu, normalizeTelegramCommand, TELEGRAM_COMMAND_DEFINITIONS, telegramHelpText } from "./commands.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
-import { finalizeQueueNotice, formatQueueListing, MAX_QUEUED_TASKS, parseQueueCancelId, TelegramTaskQueue } from "./queue.ts";
 import { renderTelegramMessage, renderTelegramMessageParts, sendTelegramMessage, type TelegramRequester } from "./message-renderer.ts";
 import telegramExtension from "./index.ts";
 import { formatTelegramReplyContext } from "./reply-context.ts";
@@ -99,61 +98,6 @@ test("agent board groups concurrent agents and starts a fresh batch after all fi
   assert.deepEqual(batches.all().map((entry) => entry.id), ["d"]);
 });
 
-test("queue finalization edits its acknowledgment without reacting to the source message", async () => {
-  const calls: string[] = [];
-  await finalizeQueueNotice({
-    signal: new AbortController().signal,
-    editNotice: async () => { calls.push("edit"); },
-  });
-  assert.deepEqual(calls, ["edit"]);
-});
-
-test("aborted queue finalization leaves the acknowledgment untouched", async () => {
-  const controller = new AbortController();
-  controller.abort();
-  let edited = false;
-  await finalizeQueueNotice({ signal: controller.signal, editNotice: async () => { edited = true; } });
-  assert.equal(edited, false);
-});
-
-test("queue finalization catches status-edit failures", async () => {
-  let error: unknown;
-  await finalizeQueueNotice({
-    signal: new AbortController().signal,
-    editNotice: async () => { throw new Error("edit failed"); },
-    onError: (failure) => { error = failure; },
-  });
-  assert.ok(error instanceof Error);
-  assert.equal(error.message, "edit failed");
-});
-
-test("queue preserves FIFO and scopes cancellation and clearing by chat", () => {
-  const queue = new TelegramTaskQueue();
-  const first = queue.enqueue(1, "first")!;
-  const otherChat = queue.enqueue(2, "other chat")!;
-  const last = queue.enqueue(1, "last")!;
-  assert.equal(queue.remove(first.id, 2), undefined);
-  assert.deepEqual(queue.removeAllForChat(1), [first, last]);
-  assert.equal(queue.length, 1);
-  assert.equal(queue.takeNext(), otherChat);
-  assert.equal(queue.takeNext(), undefined);
-});
-
-test("queue listing uses real line breaks and cancel accepts trailing arguments", () => {
-  const text = formatQueueListing([{ id: "q1", chatId: 1, text: "first\n  second" }]);
-  assert.equal(text, "You have 1 queued task(s):\n• ID `q1`: first second\n\nRemove a task: /queue_cancel <ID>");
-  assert.equal(parseQueueCancelId("q1 extra args"), "q1");
-  assert.equal(parseQueueCancelId("  \n"), undefined);
-});
-
-test("queue enforces its shared capacity", () => {
-  const queue = new TelegramTaskQueue();
-  const tasks = Array.from({ length: MAX_QUEUED_TASKS }, (_, index) => queue.enqueue(1, String(index))!);
-  assert.equal(queue.length, MAX_QUEUED_TASKS);
-  assert.equal(queue.enqueue(1, "overflow"), undefined);
-  assert.equal(queue.takeNext(), tasks[0]);
-});
-
 test("command registry dispatches aliases to one canonical handler", async () => {
   const registry = new TelegramCommandRegistry<{ calls: string[] }>();
   registry.register("start", async ({ calls }, args) => { calls.push(`start:${args}`); });
@@ -211,6 +155,7 @@ test("Telegram polling covers busy and successful session-command paths with the
     { text: "/bash echo busy", idle: false },
     { text: "active Telegram task", idle: true },
     { text: "busy Telegram prompt", idle: false, chatId: 84, userId: 8 },
+    { text: "busy send failure", idle: false, chatId: 84, userId: 8 },
     { text: "inspect this attachment", idle: false, attachment: true, chatId: 84, userId: 8 },
     { text: "/cancel", idle: false },
     { text: "/reload", idle: true },
@@ -259,6 +204,7 @@ test("Telegram polling covers busy and successful session-command paths with the
       throw new TypeError("fetch failed", { cause });
     } else if (method === "getUpdates" && nextUpdate < updates.length) {
       const update = updates[nextUpdate]!;
+      sessionIdle = update.idle;
       if (nextUpdate > 0 && updates[nextUpdate - 1]?.text === "/compact summarize briefly") {
         const signal = init?.signal;
         while (!compactCompleted && !signal?.aborted) await new Promise((resolve) => setTimeout(resolve, 1));
@@ -271,9 +217,9 @@ test("Telegram polling covers busy and successful session-command paths with the
           await new Promise((resolve) => setTimeout(resolve, 1));
         }
         if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+        await new Promise((resolve) => setTimeout(resolve, 10));
         await events.get("agent_settled")?.();
       }
-      sessionIdle = update.idle;
       result = [{
         update_id: nextUpdate + 1,
         message: {
@@ -339,6 +285,7 @@ test("Telegram polling covers busy and successful session-command paths with the
     sendUserMessage: (text: string, options?: Record<string, unknown>) => {
       userMessages.push(text);
       userMessageOptions.push(options);
+      if (text === "busy send failure") throw new Error("steering unavailable");
       if (text === "active Telegram task") void events.get("agent_start")?.({});
     },
     exec: async (_command: string, args: string[]) => {
@@ -385,6 +332,7 @@ test("Telegram polling covers busy and successful session-command paths with the
 
     assert.ok(sent.length >= minimumResponses, `Expected at least ${minimumResponses} Telegram responses; got: ${sent.join(" | ")}`);
     assert.ok(sent.some((text) => text.includes("Pi is busy.")));
+    assert.ok(sent.some((text) => text.includes("Could not submit this message to Pi. Please try again.")), "failed steering submissions are rejected explicitly");
     assert.ok(sent.some((text) => text.includes("Available models (1)")));
     assert.ok(sent.some((text) => text.includes("Model selected: test-provider/test-model")));
     assert.ok(sent.some((text) => text.includes("Current effort: medium")));
@@ -408,19 +356,25 @@ test("Telegram polling covers busy and successful session-command paths with the
     assert.equal(compactInstructions, "summarize briefly");
     assert.deepEqual(bashCommands, ["-lc printf success"]);
     const reactionDeadline = Date.now() + 1000;
-    while ((!reactions.some((body) => body.message_id === 12) || !warnings.some((warning) => warning.includes("Failed to mark a submitted message."))) && Date.now() < reactionDeadline) {
+    while ((!reactions.some((body) => body.message_id === 14) || !warnings.some((warning) => warning.includes("Failed to mark a submitted message."))) && Date.now() < reactionDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.equal(userMessages[0], "active Telegram task");
+    assert.equal(userMessageOptions[0]?.deliverAs, "steer", "idle ordinary text is submitted through Pi steering too");
     assert.equal(userMessages[1], "busy Telegram prompt");
-    assert.match(userMessages[2] ?? "", /inspect this attachment\n\nUser attached file: .*\.telegram-inbox\/.*notes\.txt\. Inspect it as needed\./);
-    assert.deepEqual(userMessages.slice(3), ["/telegram-reload", "/telegram-new"]);
+    assert.equal(userMessages[2], "busy send failure");
+    assert.match(userMessages[3] ?? "", /inspect this attachment\n\nUser attached file: .*\.telegram-inbox\/.*notes\.txt\. Inspect it as needed\./);
+    assert.deepEqual(userMessages.slice(4), ["/telegram-reload", "/telegram-new"]);
+    assert.equal(userMessages.filter((text) => text === "busy send failure").length, 1, "a failed submission is not replayed later");
     assert.equal(userMessageOptions[1]?.deliverAs, "steer");
     assert.equal(userMessageOptions[2]?.deliverAs, "steer");
-    assert.ok(reactions.some((body) => body.chat_id === 84 && body.message_id === 13 && Array.isArray(body.reaction) && (body.reaction[0] as { emoji?: string }).emoji === "👀"));
+    assert.equal(userMessageOptions[3]?.deliverAs, "steer");
+    assert.ok(reactions.some((body) => body.chat_id === 84 && body.message_id === 14 && Array.isArray(body.reaction) && (body.reaction[0] as { emoji?: string }).emoji === "👀"));
     assert.ok(sentChats.some((message) => message.chatId === 84 && message.text.includes("Pi completed the task without a text response.")), `final response follows the latest ordinary Telegram input chat: ${JSON.stringify(sentChats)}`);
     assert.ok(warnings.some((warning) => warning.includes("Failed to mark a submitted message.")), "reaction failures are best-effort");
-    assert.ok(reactions.every((body) => Array.isArray(body.reaction) && (body.reaction[0] as { emoji?: string }).emoji === "👀"), "queue status never uses thumbs-up/down reactions");
+    assert.ok(reactions.every((body) => Array.isArray(body.reaction) && (body.reaction[0] as { emoji?: string }).emoji === "👀"), "submitted messages only receive the best-effort eyes reaction");
+    assert.ok(sent.every((text) => !text.includes("Added to the queue") && !text.includes("queue_cancel")), "ordinary input is never locally queued or acknowledged");
+    await events.get("agent_start")?.({}, ctx);
     const customReport = { role: "custom", customType: "pi-ad-session-usage:report", content: "compact usage report", details: { private: "structured details" }, display: true, timestamp: Date.now() };
     await events.get("message_end")?.({ message: { ...customReport, customType: "unrelated:message" } }, ctx);
     await events.get("message_end")?.({ message: customReport }, ctx);
@@ -498,8 +452,9 @@ test("plugin commands are exposed only when available in the Pi session", () => 
 
 test("command menu, aliases, and help share one definition list", () => {
   const menu = getTelegramCommandMenu();
-  assert.ok(menu.some((command) => command.command === "queue_cancel"));
-  assert.equal(normalizeTelegramCommand("queue-cancel"), "queue_cancel");
+  assert.ok(menu.every((command) => !["queue", "queue_cancel", "clear_queue"].includes(command.command)));
+  assert.equal(normalizeTelegramCommand("queue_cancel"), undefined);
+  assert.equal(normalizeTelegramCommand("clear_queue"), undefined);
   assert.equal(normalizeTelegramCommand("help"), "start");
   for (const command of menu) assert.ok(normalizeTelegramCommand(command.command));
   for (const definition of TELEGRAM_COMMAND_DEFINITIONS) assert.ok(telegramHelpText().includes(definition.help));

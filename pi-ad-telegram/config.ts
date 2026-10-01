@@ -5,7 +5,6 @@ import { isAbsolute, join, resolve } from "node:path";
 const TELEGRAM_TEXT_LIMIT = 4096;
 const TELEGRAM_LONG_POLL_LIMIT_SECONDS = 50;
 const TELEGRAM_CHAT_ACTION_LIFETIME_MS = 5000;
-const MAX_QUEUE_CAPACITY = 1000;
 const MAX_STALE_BACKLOG_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_RETRY_DELAY_MS = 60 * 60 * 1000;
 const MAX_POLL_INTERVAL_MS = 10 * 60 * 1000;
@@ -36,7 +35,6 @@ export const TELEGRAM_PRESENTATION_LIMITS = {
 export const MAX_EDIT_DIFF_COMPARISON_CELLS = 1_000_000;
 
 export interface TelegramSettings {
-  queueCapacity: number;
   longPollTimeoutSeconds: number;
   staleBacklogThresholdMs: number;
   messageChunkLimit: number;
@@ -48,13 +46,11 @@ export interface TelegramSettings {
   shutdownCleanupTimeoutMs: number;
   activityHistoryLimit: number;
   activityTextLimit: number;
-  queuePreviewLimit: number;
   backgroundTaskPreviewLimit: number;
   outboxPath: string;
 }
 
 export const DEFAULT_TELEGRAM_SETTINGS: Omit<TelegramSettings, "outboxPath"> = {
-  queueCapacity: 20,
   longPollTimeoutSeconds: 20,
   staleBacklogThresholdMs: 30_000,
   messageChunkLimit: 3500,
@@ -66,7 +62,6 @@ export const DEFAULT_TELEGRAM_SETTINGS: Omit<TelegramSettings, "outboxPath"> = {
   shutdownCleanupTimeoutMs: 5000,
   activityHistoryLimit: 35,
   activityTextLimit: 550,
-  queuePreviewLimit: 180,
   backgroundTaskPreviewLimit: 82,
 };
 
@@ -91,10 +86,10 @@ export function parseTelegramSettings(value: unknown, agentDirectory: string): T
   if (!isRecord(value)) throw new Error("Telegram settings must be a JSON object");
 
   const allowedKeys = new Set<keyof TelegramSettings>([
-    "queueCapacity", "longPollTimeoutSeconds", "staleBacklogThresholdMs", "messageChunkLimit",
+    "longPollTimeoutSeconds", "staleBacklogThresholdMs", "messageChunkLimit",
     "retryBaseDelayMs", "retryMaxDelayMs", "agentBoardRefreshIntervalMs", "typingRefreshIntervalMs",
     "commandTimeoutMs", "shutdownCleanupTimeoutMs", "activityHistoryLimit", "activityTextLimit",
-    "queuePreviewLimit", "backgroundTaskPreviewLimit", "outboxPath",
+    "backgroundTaskPreviewLimit", "outboxPath",
   ]);
   for (const key of Object.keys(value)) {
     if (!allowedKeys.has(key as keyof TelegramSettings)) throw new Error(`Unknown Telegram setting: ${key}`);
@@ -154,7 +149,6 @@ function parseNumericSettings(value: Record<string, unknown>): Partial<TelegramS
     return candidate;
   };
 
-  const queueCapacity = integer("queueCapacity", MIN_DISPLAY_LIMIT, MAX_QUEUE_CAPACITY);
   const longPollTimeoutSeconds = integer("longPollTimeoutSeconds", 0, TELEGRAM_LONG_POLL_LIMIT_SECONDS);
   const staleBacklogThresholdMs = integer("staleBacklogThresholdMs", 0, MAX_STALE_BACKLOG_AGE_MS);
   const messageChunkLimit = integer("messageChunkLimit", MIN_MESSAGE_CHUNK_LENGTH, TELEGRAM_TEXT_LIMIT);
@@ -166,11 +160,9 @@ function parseNumericSettings(value: Record<string, unknown>): Partial<TelegramS
   const shutdownCleanupTimeoutMs = integer("shutdownCleanupTimeoutMs", MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS);
   const activityHistoryLimit = integer("activityHistoryLimit", MIN_DISPLAY_LIMIT, MAX_ACTIVITY_HISTORY);
   const activityTextLimit = integer("activityTextLimit", MIN_DISPLAY_LIMIT, TELEGRAM_TEXT_LIMIT);
-  const queuePreviewLimit = integer("queuePreviewLimit", MIN_DISPLAY_LIMIT, TELEGRAM_TEXT_LIMIT);
   const backgroundTaskPreviewLimit = integer("backgroundTaskPreviewLimit", MIN_DISPLAY_LIMIT, TELEGRAM_TEXT_LIMIT);
 
   return {
-    ...(queueCapacity === undefined ? {} : { queueCapacity }),
     ...(longPollTimeoutSeconds === undefined ? {} : { longPollTimeoutSeconds }),
     ...(staleBacklogThresholdMs === undefined ? {} : { staleBacklogThresholdMs }),
     ...(messageChunkLimit === undefined ? {} : { messageChunkLimit }),
@@ -182,7 +174,6 @@ function parseNumericSettings(value: Record<string, unknown>): Partial<TelegramS
     ...(shutdownCleanupTimeoutMs === undefined ? {} : { shutdownCleanupTimeoutMs }),
     ...(activityHistoryLimit === undefined ? {} : { activityHistoryLimit }),
     ...(activityTextLimit === undefined ? {} : { activityTextLimit }),
-    ...(queuePreviewLimit === undefined ? {} : { queuePreviewLimit }),
     ...(backgroundTaskPreviewLimit === undefined ? {} : { backgroundTaskPreviewLimit }),
   };
 }

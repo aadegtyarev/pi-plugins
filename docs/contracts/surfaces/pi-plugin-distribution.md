@@ -8,7 +8,7 @@ The `pi-plugins` Git repository is the canonical source for three first-party Pi
 
 - Install the private Git package with `pi install git:github.com/aadegtyarev/pi-plugins`. GitHub authentication must already permit access to the repository.
 - The package exposes exactly the three extension entry points above. Installing it does not configure Telegram credentials or hook preferences.
-- When both Telegram and session-usage extensions are loaded, the Telegram extension observes the public custom-message lifecycle and forwards only `pi-ad-session-usage:report` text for Telegram-associated work. Structured details and unrelated custom messages are not forwarded. This integration does not depend on manifest entry order.
+- When both Telegram and session-usage extensions are loaded, the Telegram extension observes the public custom-message lifecycle and forwards the `pi-ad-session-usage:report` text once to the chat associated with its Telegram-originated run. Structured details, TUI-only reports, unrelated custom messages, and duplicate assistant responses are not forwarded. This integration does not depend on manifest entry order; transport delivery remains best-effort.
 - The extensions use Pi host APIs. Development dependencies support typechecking and tests; Pi runtime modules are peer dependencies, not bundled copies.
 - Pi records the package at personal scope by default. Updates follow Pi's package manager; this repository does not automatically update a user's installed version.
 

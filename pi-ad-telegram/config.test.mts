@@ -23,7 +23,6 @@ test("missing settings file yields documented defaults and agent-local outbox pa
     ...DEFAULT_TELEGRAM_SETTINGS,
     outboxPath: "/custom/pi-agent/telegram-outbox.json",
   });
-  assert.equal(settings.queueCapacity, 20);
   assert.equal(settings.staleBacklogThresholdMs, 30_000);
   assert.equal(settings.messageChunkLimit, 3500);
 });
@@ -32,14 +31,12 @@ test("settings file overrides defaults, resolves relative paths, and leaves cred
   const root = await mkdtemp(join(tmpdir(), "pi-telegram-settings-"));
   try {
     await writeFile(join(root, "pi-ad-telegram.json"), JSON.stringify({
-      queueCapacity: 8,
       staleBacklogThresholdMs: 45_000,
       retryBaseDelayMs: 250,
       retryMaxDelayMs: 5000,
       outboxPath: "state/outbox.json",
     }));
     const settings = await loadTelegramSettings({ PI_CODING_AGENT_DIR: root, PI_TELEGRAM_BOT_TOKEN: "never-read" }, HOME);
-    assert.equal(settings.queueCapacity, 8);
     assert.equal(settings.staleBacklogThresholdMs, 45_000);
     assert.equal(settings.retryBaseDelayMs, 250);
     assert.equal(settings.retryMaxDelayMs, 5000);
@@ -55,8 +52,7 @@ test("absolute outbox paths remain absolute", () => {
 });
 
 test("invalid setting types, ranges, unknown keys, and retry ordering are rejected", () => {
-  assert.throws(() => parseTelegramSettings({ queueCapacity: "20" }, "/agent"), /queueCapacity must be an integer/);
-  assert.throws(() => parseTelegramSettings({ queueCapacity: 0 }, "/agent"), /queueCapacity must be an integer/);
+  assert.throws(() => parseTelegramSettings({ queueCapacity: 20 }, "/agent"), /Unknown Telegram setting: queueCapacity/);
   assert.throws(() => parseTelegramSettings({ longPollTimeoutSeconds: 51 }, "/agent"), /longPollTimeoutSeconds must be an integer/);
   assert.throws(() => parseTelegramSettings({ retryBaseDelayMs: 5000, retryMaxDelayMs: 1000 }, "/agent"), /retryMaxDelayMs must be greater than or equal/);
   assert.throws(() => parseTelegramSettings({ botToken: "secret" }, "/agent"), /Unknown Telegram setting: botToken/);
@@ -69,8 +65,8 @@ test("malformed settings JSON and invalid settings are reported with the setting
   try {
     await writeFile(path, "{");
     await assert.rejects(loadTelegramSettings({ PI_CODING_AGENT_DIR: root }, HOME), /Invalid JSON in Telegram settings file/);
-    await writeFile(path, JSON.stringify({ queueCapacity: -1 }));
-    await assert.rejects(loadTelegramSettings({ PI_CODING_AGENT_DIR: root }, HOME), /Invalid Telegram settings in .*queueCapacity/);
+    await writeFile(path, JSON.stringify({ queueCapacity: 20 }));
+    await assert.rejects(loadTelegramSettings({ PI_CODING_AGENT_DIR: root }, HOME), /Unknown Telegram setting: queueCapacity/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
