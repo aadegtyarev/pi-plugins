@@ -1,4 +1,3 @@
-import { DEFAULT_TELEGRAM_SETTINGS } from "./config.ts";
 
 const TELEGRAM_COMMAND_DESCRIPTION_LIMIT = 256;
 const TELEGRAM_COMMAND_MENU_LIMIT = 100;
@@ -24,9 +23,6 @@ export const TELEGRAM_COMMAND_DEFINITIONS: TelegramCommandDefinition[] = [
   ], help: "/start, /help — connect and show help" },
   { name: "status", description: "Pi status and session statistics", menu: [{ command: "status", description: "Pi status and session statistics" }], help: "/status — show Pi status, model, effort, context, and session statistics" },
   { name: "agents", description: "Background agents and tasks", menu: [{ command: "agents", description: "Background agents and tasks" }], help: "/agents — refresh the background-agent board" },
-  { name: "queue", description: "Show queued tasks and their IDs", menu: [{ command: "queue", description: "Show queued tasks and their IDs" }], help: "/queue — show pending tasks and their IDs" },
-  { name: "queue_cancel", aliases: ["queue-cancel"], description: "Remove a queued task by ID", menu: [{ command: "queue_cancel", description: "Remove a queued task by ID" }], help: "/queue_cancel <ID> — remove a pending task" },
-  { name: "clear_queue", aliases: ["clear-queue"], description: "Clear pending tasks", menu: [{ command: "clear_queue", description: "Clear pending tasks" }], help: "/clear_queue — remove all pending tasks" },
   { name: "model", description: "List or select a model", menu: [{ command: "model", description: "List or select a model" }], help: "/model — list models; /model provider/model-id — select a model" },
   { name: "effort", description: "Thinking effort level", menu: [{ command: "effort", description: "Thinking effort level" }], help: "/effort — list levels; /effort <level> — select an effort level" },
   { name: "compact", description: "Compact context", menu: [{ command: "compact", description: "Compact context" }], help: "/compact [instructions] — compact context" },
@@ -82,12 +78,9 @@ export function getPluginTelegramCommand(name: string, commands: readonly PiSess
   return resolvePluginTelegramCommands(commands).find((command) => command.command === name.toLowerCase());
 }
 
-export function telegramHelpText(
-  commands: readonly PiSessionCommand[] = [],
-  queueCapacity = DEFAULT_TELEGRAM_SETTINGS.queueCapacity,
-): string {
+export function telegramHelpText(commands: readonly PiSessionCommand[] = []): string {
   return [
-    `I'm connected to a running Pi session. Send text to pass a task to the agent. Messages received while Pi is busy are added to a FIFO queue (up to ${queueCapacity} tasks) and run one at a time after each operation finishes. Background agents do not block new input after the parent turn completes.`,
+    "I'm connected to a running Pi session. Send text or attachments to pass a task to the agent; messages received while Pi is busy use Pi's steering queue. Inputs that Pi cannot accept are rejected rather than deferred. Background agents do not block new input after the parent turn completes.",
     ...TELEGRAM_COMMAND_DEFINITIONS.map((definition) => definition.help),
     ...getPluginTelegramCommands(commands).map((command) => `/${command.command} — ${command.description}`),
   ].join("\n\n");

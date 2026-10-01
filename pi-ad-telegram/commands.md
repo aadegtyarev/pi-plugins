@@ -17,9 +17,6 @@ The bridge is off at startup unless Pi received `--telegram` or `PI_TELEGRAM_ENA
 |---|---|
 | `/status` | Show whether Pi is busy, the active model and effort, and estimated context usage. |
 | `/agents` | Refresh the background-agent board. A completed board remains in chat unpinned. |
-| `/queue` | List bridge-local pending tasks and their IDs; does not show Pi's steering queue. |
-| `/queue_cancel <ID>` | Remove one bridge-local pending task; cannot remove a message already submitted to Pi. |
-| `/clear_queue` | Clear this chat's bridge-local pending tasks, not the active task or Pi's steering queue. |
 | `/model` | List models available to the current Pi session. |
 | `/model provider/model-id` | Switch the current session's model. An unambiguous model name or ID is also accepted. |
 | `/effort` | Show the current effort and levels supported by the active model. |
@@ -37,4 +34,4 @@ Long command output is split across messages. `/bash` has no interactive TTY, so
 
 Commands provided by loaded Pi extensions are included when they are eligible for Telegram. Hyphens are mapped to underscores in Telegram names: for example, `/wt-create` appears as `/wt_create`. Pi's internal `telegram*` control commands are not exposed. Unknown slash commands are rejected rather than sent as ordinary prompts.
 
-Ordinary text or attachments sent while Pi is running are submitted to Pi's steering queue and best-effort marked 👀; the marker is not confirmation of acceptance or processing. See [operations](operations.md) for bridge-local queues, cancellation limits, stale backlog, and delivery behavior.
+Ordinary text and attachments are submitted to Pi with `deliverAs: "steer"` and best-effort marked 👀; the marker is not confirmation of acceptance or processing. There are no Telegram queue controls. Inputs Pi cannot accept immediately are rejected with a retry explanation, never deferred. See [operations](operations.md) for stale backlog and delivery behavior.

@@ -19,7 +19,6 @@ Settings are read at `session_start` from `<PI_CODING_AGENT_DIR>/pi-ad-telegram.
 
 | Key | Default | Meaning |
 |---|---:|---|
-| `queueCapacity` | `20` | Maximum pending bridge-local tasks; does not limit Pi's internal steering queue. |
 | `longPollTimeoutSeconds` | `20` | Telegram long-poll timeout. |
 | `staleBacklogThresholdMs` | `30000` | Outage duration after which recovered messages are treated as stale. |
 | `messageChunkLimit` | `3500` | Internal target for message chunks. |
@@ -29,14 +28,13 @@ Settings are read at `session_start` from `<PI_CODING_AGENT_DIR>/pi-ad-telegram.
 | `commandTimeoutMs` | `120000` | Maximum `/bash` runtime. |
 | `shutdownCleanupTimeoutMs` | `5000` | Bound for activity cleanup at shutdown. |
 | `activityHistoryLimit` / `activityTextLimit` | `35` / `550` | Maximum activity rows and summary characters. |
-| `queuePreviewLimit` / `backgroundTaskPreviewLimit` | `180` / `82` | Maximum queue and task-preview characters. |
+| `backgroundTaskPreviewLimit` | `82` | Maximum background task-preview characters. |
 | `outboxPath` | `<agent-dir>/telegram-outbox.json` | Durable buffer for outgoing text sends and edits. |
 
 Example:
 
 ```json
 {
-  "queueCapacity": 20,
   "longPollTimeoutSeconds": 20,
   "outboxPath": "telegram-outbox.json"
 }

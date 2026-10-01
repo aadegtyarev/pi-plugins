@@ -1,16 +1,14 @@
-# Telegram queues and delivery
+# Telegram delivery
 
-## Queue behavior
+## Task submission
 
-Ordinary text and attachments received while Pi is running are submitted directly to Pi with `deliverAs: "steer"`. The bridge best-effort adds 👀 to the source message after submission. This only indicates that the bridge called Pi's submission API; it does not confirm queue acceptance or processing, and the bridge cannot mark when that exact item starts. Pi-steered messages are not listed by `/queue` and cannot be individually removed with `/queue_cancel` or `/clear_queue`.
+Ordinary text and attachments received while Pi is running are submitted to Pi with `deliverAs: "steer"`, including when Pi is busy. The bridge best-effort adds 👀 to the source message after calling Pi's submission API; this marker does not confirm acceptance or processing. No Telegram-owned task FIFO, local task IDs, queue acknowledgements, cancellation buttons, or queue-management commands exist.
 
-The per-chat FIFO queue is reserved for work that remains bridge-managed, including eligible extension slash commands, stale/offline batches while Pi is busy, and ordinary input received during bridge-only operations. When Pi is idle, a stale/offline batch is dispatched normally with its explicit relevance warning. Its default capacity is 20 pending tasks and can be changed with `queueCapacity`. Each local task is acknowledged with its ID and can be removed with `/queue_cancel <ID>`; `/clear_queue` removes all pending local tasks for that chat. The active task is not cancelled by clearing the queue. When the local queue is full, the bot rejects a new local item explicitly.
-
-Local queued tasks start one at a time after the current Pi, Bash, compaction, or new-session operation settles. The bot edits the queue acknowledgement to show ✅ when a local task starts or ❌ when cancelled, and removes its inline cancel button. It does not add 👍/👎 reactions to the source message.
+Eligible extension slash commands are forwarded directly to their Pi handlers only when Pi can handle them immediately. Built-in bridge commands retain their direct behavior. If Pi is busy in a way that cannot accept an input, or is occupied by a bridge-only operation, the bot explains that the input was not queued and asks the user to retry; it does not defer or replay the input. Stale/offline batches are still identified as stale, and are rejected with an explanation rather than being deferred when Pi cannot accept them. Stale slash commands are filtered.
 
 ## Offline and stale messages
 
-On startup, messages received while Pi was offline are collected per chat and delivered together as one explicitly stale batch. Messages accumulated during a network outage of at least 30 seconds are handled the same way after reconnection. Pi asks whether ordinary stale requests are still relevant before acting. Stale slash commands are filtered and never replayed.
+On startup, messages received while Pi was offline are collected per chat and delivered together as one explicitly stale batch when Pi can accept it. Messages accumulated during a network outage of at least 30 seconds are handled the same way after reconnection. Pi asks whether ordinary stale requests are still relevant before acting. Stale slash commands are filtered and never replayed.
 
 ## Attachments and replies
 
@@ -22,10 +20,10 @@ Text sends and edits are persisted FIFO at `<agent-dir>/telegram-outbox.json` by
 
 Telegram does not provide an idempotency key for these operations. If Telegram accepts a message but the connection drops before the response arrives, a retry can create a duplicate.
 
-## Activity and background agents
+## Activity, usage, and background agents
 
-While a Telegram-originated task is actively processing, the bot refreshes Telegram's typing action. Queued tasks do not show typing. The Pi activity bubble ends with a local-time `Updated: HH:mm` footer. Automatic and manual compaction update one activity row; they do not create separate lifecycle chat messages.
+While a Telegram-originated task is actively processing, the bot refreshes Telegram's typing action. A visible `pi-ad-session-usage:report` summary is forwarded once to the chat associated with that Telegram-originated run; TUI-only and unrelated reports are not sent. The report text can include estimated cost when available. Telegram delivery remains best-effort and is not guaranteed exactly once across transport retries.
 
-Background agents do not hold the Telegram input lock after the parent turn settles. A shared, edited-in-place board shows each agent's effective model when available, a short task summary, status, elapsed time, and reported token usage. It does not display the full task prompt. Running token counts are provisional; missing usage is labeled unavailable. Completed rows remain as recent history. `/agents` refreshes the board.
+The Pi activity bubble ends with a local-time `Updated: HH:mm` footer. Automatic and manual compaction update one activity row; they do not create separate lifecycle chat messages. Background agents do not hold the Telegram input lock after the parent turn settles. A shared, edited-in-place board shows each agent's effective model when available, a short task summary, status, elapsed time, and reported token usage. It does not display the full task prompt. Running token counts are provisional; missing usage is labeled unavailable. Completed rows remain as recent history. `/agents` refreshes the board.
 
 The included `pi-subagents` adapter is the only provider-specific lifecycle integration. Telegram activity and delivery failures are best-effort and do not block Pi work.
