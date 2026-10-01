@@ -326,7 +326,7 @@ test("Telegram polling covers busy and successful session-command paths with the
     await events.get("session_start")?.({}, ctx);
     const minimumResponses = 15;
     const deadline = Date.now() + 5000;
-    while ((sent.length < minimumResponses || userMessages.length < 3 || nextUpdate < updates.length) && Date.now() < deadline) {
+    while ((sent.length < minimumResponses || userMessages.length < 6 || nextUpdate < updates.length) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
@@ -421,6 +421,238 @@ test("Telegram polling covers busy and successful session-command paths with the
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     await rm(testCwd, { recursive: true, force: true });
+  }
+});
+
+test("deferred background summaries retain their distinct Telegram launch routes", async () => {
+  const previousToken = process.env.PI_TELEGRAM_BOT_TOKEN;
+  const previousAllowedIds = process.env.PI_TELEGRAM_ALLOWED_USER_IDS;
+  const previousEnabled = process.env.PI_TELEGRAM_ENABLED;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousFetch = globalThis.fetch;
+  const previousError = console.error;
+  const testAgentDir = await mkdtemp(join(tmpdir(), "pi-ad-telegram-background-"));
+  const sentChats: Array<{ chatId: number; text: string }> = [];
+  const userMessages: string[] = [];
+  const errors: string[] = [];
+  const pendingUpdates: unknown[] = [{ update_id: 1, message: { message_id: 1, from: { id: 7 }, chat: { id: 42, type: "private" }, text: "parent task" } }];
+  let releaseUpdatePoll: (() => void) | undefined;
+  const queueTelegramUpdate = (updateId: number, messageId: number, chatId: number, text: string) => {
+    pendingUpdates.push({ update_id: updateId, message: { message_id: messageId, from: { id: 7 }, chat: { id: chatId, type: "private" }, text } });
+    releaseUpdatePoll?.();
+    releaseUpdatePoll = undefined;
+  };
+  let nextMessageId = 0;
+  let heldReplyChatId: number | undefined;
+  let heldReplyText: string | undefined;
+  let heldReplyReached = false;
+  let parentSettlementActive = false;
+  const deferredBackgroundSummaryIds: string[] = [];
+  let releaseHeldReply: () => void = () => {};
+  let heldReplyGate = Promise.resolve();
+  const holdReply = (chatId: number, text: string) => {
+    heldReplyChatId = chatId;
+    heldReplyText = text;
+    heldReplyReached = false;
+    heldReplyGate = new Promise<void>((resolve) => { releaseHeldReply = resolve; });
+  };
+  const releaseReply = () => {
+    releaseHeldReply();
+    heldReplyChatId = undefined;
+    heldReplyText = undefined;
+  };
+  const events = new Map<string, (...args: any[]) => unknown>();
+  const lifecycleEvents = new Map<string, (...args: any[]) => unknown>();
+  const availableModel = { provider: "test-provider", id: "test-model", name: "Test model", reasoning: true };
+  console.error = (...args) => { errors.push(args.map(String).join(" ")); };
+  process.env.PI_TELEGRAM_BOT_TOKEN = "test-token";
+  process.env.PI_TELEGRAM_ALLOWED_USER_IDS = "7";
+  process.env.PI_TELEGRAM_ENABLED = "1";
+  process.env.PI_CODING_AGENT_DIR = testAgentDir;
+
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const method = url.pathname.split("/").at(-1);
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    let result: unknown = true;
+    if (method === "getMe") result = { id: 1, is_bot: true, first_name: "test", username: "test_bot" };
+    else if (method === "getUpdates" && body.timeout === 0) result = [];
+    else if (method === "getUpdates") {
+      const signal = init?.signal;
+      if (pendingUpdates.length === 0) {
+        await new Promise<void>((resolve, reject) => {
+          if (signal?.aborted) reject(signal.reason);
+          else {
+            releaseUpdatePoll = resolve;
+            signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+          }
+        });
+      }
+      if (signal?.aborted) throw signal.reason;
+      result = pendingUpdates.splice(0, pendingUpdates.length);
+    } else if (method === "sendMessage") {
+      const text = String(body.text);
+      sentChats.push({ chatId: Number(body.chat_id), text });
+      if (heldReplyChatId === Number(body.chat_id) && heldReplyText && text.includes(heldReplyText)) {
+        heldReplyChatId = undefined;
+        heldReplyText = undefined;
+        heldReplyReached = true;
+        await heldReplyGate;
+      }
+      result = { message_id: ++nextMessageId };
+    } else if (method === "getChat") result = {};
+    return new Response(JSON.stringify({ ok: true, result }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  const pi = {
+    registerFlag() {},
+    registerCommand() {},
+    registerTool() {},
+    on(event: string, handler: (...args: any[]) => unknown) { events.set(event, handler); },
+    events: { on(event: string, handler: (...args: any[]) => unknown) { lifecycleEvents.set(event, handler); } },
+    getFlag: () => false,
+    getCommands: () => [],
+    sendUserMessage(text: string) {
+      userMessages.push(text);
+      if (["parent task", "second parent task", "third parent task"].includes(text)) void events.get("agent_start")?.({});
+      if (text.includes("run ID: background-failed")) throw new Error("summary submission failed");
+      const backgroundRunId = text.match(/run ID: (background-[\w-]+)/)?.[1];
+      if (["background-success", "background-second", "background-third"].includes(backgroundRunId ?? "")) {
+        if (parentSettlementActive && backgroundRunId) deferredBackgroundSummaryIds.push(backgroundRunId);
+        else void events.get("agent_start")?.({});
+      }
+    },
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    cwd: testAgentDir,
+    model: availableModel,
+    modelRegistry: { getAvailable: () => [availableModel] },
+    isIdle: () => true,
+    getContextUsage: () => null,
+    sessionManager: {
+      getEntries: () => [],
+      getSessionName: () => undefined,
+      getSessionFile: () => undefined,
+      getSessionId: () => "background-test-session",
+    },
+  } as unknown as ExtensionContext;
+
+  const waitFor = async (predicate: () => boolean, message: string) => {
+    const deadline = Date.now() + 1500;
+    while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(predicate(), message);
+  };
+
+  try {
+    telegramExtension(pi);
+    await events.get("session_start")?.({}, ctx);
+    await waitFor(() => userMessages.includes("parent task"), "the first Telegram task should reach Pi");
+
+    const started = lifecycleEvents.get("subagent:async-started");
+    const completed = lifecycleEvents.get("subagent:async-complete");
+    assert.ok(started);
+    assert.ok(completed);
+    started({ id: "background-success", agent: "reviewer", task: "summary from chat 42" });
+    await waitFor(() => sentChats.filter((message) => message.text.includes("Background agent started: reviewer")).length === 1, "the first Telegram-launched background agent should be announced");
+    await events.get("agent_settled")?.({}, ctx);
+
+    queueTelegramUpdate(2, 2, 84, "second parent task");
+    await waitFor(() => userMessages.includes("second parent task"), "chat 84 should start its own parent turn");
+    started({ id: "background-second", agent: "reviewer", task: "summary from chat 84" });
+    await waitFor(() => sentChats.filter((message) => message.text.includes("Background agent started: reviewer")).length === 2, "the second Telegram-launched background agent should be announced");
+    await events.get("agent_settled")?.({}, ctx);
+
+    queueTelegramUpdate(3, 3, 99, "third parent task");
+    await waitFor(() => userMessages.includes("third parent task"), "chat 99 should start its own parent turn");
+    started({ id: "background-third", agent: "reviewer", task: "summary from chat 99" });
+    started({ id: "background-failed", agent: "reviewer", task: "failed summary from chat 99" });
+    await waitFor(() => sentChats.filter((message) => message.text.includes("Background agent started: reviewer")).length === 4, "background agents from all three Telegram chats should be announced");
+
+    holdReply(99, "Pi completed the task without a text response.");
+    parentSettlementActive = true;
+    const parentSettlement = events.get("agent_settled")?.({}, ctx) as Promise<void>;
+    await waitFor(() => heldReplyReached, "parent settlement should be held while delivering its Telegram reply");
+    completed({ id: "background-success", agent: "reviewer", state: "completed", success: true });
+    completed({ id: "background-second", agent: "reviewer", state: "completed", success: true });
+    await waitFor(() => deferredBackgroundSummaryIds.length === 2, "the first two background completions should queue deferred Pi summaries");
+    assert.deepEqual(deferredBackgroundSummaryIds, ["background-success", "background-second"]);
+    releaseReply();
+    await parentSettlement;
+    parentSettlementActive = false;
+
+    const promptFor = (runId: string) => {
+      const prompt = userMessages.find((text) => text.includes(`run ID: ${runId}`));
+      assert.ok(prompt, `Pi nudge should exist for ${runId}`);
+      return prompt;
+    };
+    const startSummary = async (runId: string) => {
+      await events.get("before_agent_start")?.({ prompt: promptFor(runId) }, ctx);
+      await events.get("agent_start")?.({}, ctx);
+    };
+    const firstSummary = "Independent reviewer approved the fix.";
+    await startSummary("background-success");
+    const firstUsageReport = { role: "custom", customType: "pi-ad-session-usage:report", content: "chat 42 summary usage", display: true, timestamp: Date.now() };
+    await events.get("message_end")?.({ message: firstUsageReport }, ctx);
+    await events.get("message_end")?.({ message: { role: "assistant", content: [{ type: "text", text: firstSummary }] } }, ctx);
+    holdReply(42, firstSummary);
+    parentSettlementActive = true;
+    const firstSummarySettlement = events.get("agent_settled")?.({}, ctx) as Promise<void>;
+    await waitFor(() => heldReplyReached, "chat 42 summary settlement should pause before nested deferred completion");
+    completed({ id: "background-third", agent: "reviewer", state: "completed", success: true });
+    await waitFor(() => deferredBackgroundSummaryIds.length === 3, "chat 99 completion should defer a nested summary during chat 42 settlement");
+    assert.deepEqual(deferredBackgroundSummaryIds, ["background-success", "background-second", "background-third"]);
+    releaseReply();
+    await firstSummarySettlement;
+    parentSettlementActive = false;
+    assert.equal(sentChats.filter((message) => message.chatId === 42 && message.text.includes(firstSummary)).length, 1, "the first summary should reach its launch chat");
+    await waitFor(() => sentChats.some((message) => message.chatId === 42 && message.text === "chat 42 summary usage"), "the first summary usage report should retain chat 42 routing");
+
+    await startSummary("background-third");
+    const thirdUsageReport = { role: "custom", customType: "pi-ad-session-usage:report", content: "chat 99 summary usage", display: true, timestamp: Date.now() };
+    await events.get("message_end")?.({ message: thirdUsageReport }, ctx);
+    const thirdSummary = "Third background summary is ready.";
+    await events.get("message_end")?.({ message: { role: "assistant", content: [{ type: "text", text: thirdSummary }] } }, ctx);
+    await events.get("agent_settled")?.({}, ctx);
+    assert.equal(sentChats.filter((message) => message.chatId === 99 && message.text.includes(thirdSummary)).length, 1, "the nested summary should match its chat 99 nudge despite running before chat 84");
+    await waitFor(() => sentChats.some((message) => message.chatId === 99 && message.text === "chat 99 summary usage"), "the nested summary usage report should retain chat 99 routing");
+
+    await startSummary("background-second");
+    const secondUsageReport = { role: "custom", customType: "pi-ad-session-usage:report", content: "chat 84 summary usage", display: true, timestamp: Date.now() };
+    await events.get("message_end")?.({ message: secondUsageReport }, ctx);
+    const secondSummary = "Second background summary is ready.";
+    await events.get("message_end")?.({ message: { role: "assistant", content: [{ type: "text", text: secondSummary }] } }, ctx);
+    await events.get("agent_settled")?.({}, ctx);
+    assert.equal(sentChats.filter((message) => message.chatId === 84 && message.text.includes(secondSummary)).length, 1, "chat 84 summary should remain paired after nested chat 99 completion");
+    await waitFor(() => sentChats.some((message) => message.chatId === 84 && message.text === "chat 84 summary usage"), "the second summary usage report should retain chat 84 routing");
+
+    completed({ id: "background-failed", agent: "reviewer", state: "failed", success: false });
+    await waitFor(() => userMessages.some((text) => text.includes("run ID: background-failed")), "failed summary submission should be observed");
+    await waitFor(() => errors.some((error) => error.includes("Failed to queue subagent summary")), "summary submission rejection should be handled");
+    await events.get("agent_start")?.({}, ctx);
+    const unrelatedTuiResponse = "Unrelated TUI response";
+    await events.get("message_end")?.({ message: { role: "assistant", content: [{ type: "text", text: unrelatedTuiResponse }] } }, ctx);
+    await events.get("agent_settled")?.({}, ctx);
+    assert.equal(sentChats.some((message) => message.text.includes(unrelatedTuiResponse)), false, "failed background-summary submission must not leave a route for a later TUI turn");
+
+    const nudgeCount = userMessages.filter((text) => text.startsWith("Background agent ")).length;
+    started({ id: "tui-background", agent: "reviewer", task: "TUI-only task" });
+    completed({ id: "tui-background", agent: "reviewer", state: "completed", success: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(userMessages.filter((text) => text.startsWith("Background agent ")).length, nudgeCount, "TUI-only background work must not be nudged into a Telegram route");
+  } finally {
+    releaseReply();
+    await events.get("session_shutdown")?.();
+    globalThis.fetch = previousFetch;
+    console.error = previousError;
+    if (previousToken === undefined) delete process.env.PI_TELEGRAM_BOT_TOKEN;
+    else process.env.PI_TELEGRAM_BOT_TOKEN = previousToken;
+    if (previousAllowedIds === undefined) delete process.env.PI_TELEGRAM_ALLOWED_USER_IDS;
+    else process.env.PI_TELEGRAM_ALLOWED_USER_IDS = previousAllowedIds;
+    if (previousEnabled === undefined) delete process.env.PI_TELEGRAM_ENABLED;
+    else process.env.PI_TELEGRAM_ENABLED = previousEnabled;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(testAgentDir, { recursive: true, force: true });
   }
 });
 

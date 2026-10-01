@@ -18,6 +18,7 @@ The bridge is opt-in: start Pi with `--telegram` or `PI_TELEGRAM_ENABLED=1`, or 
 - While a Telegram-originated task is active, the bot refreshes Telegram's typing action. Failures are best-effort and do not block Pi.
 - The existing activity bubble ends with a local-time-only `Updated: HH:mm` footer. Automatic and `/compact` compaction transition one activity row and do not create separate lifecycle chat messages. Validation/refusal text from `/compact` remains an ordinary command response.
 - Background work is integrated through adapters. It does not hold the input lock after the parent turn settles. A shared, edited-in-place board shows each agent's effective model when available, short task summary, running/terminal state, elapsed time, and reported token usage. It never displays the full task prompt. Running token counts are provisional; unavailable usage is labeled. Completed rows remain as recent history. `/agents` refreshes the board.
+- When a Telegram-launched background agent completes after its parent turn has settled and Pi is idle, the bridge nudges Pi to write a concise synthesis and routes the resulting assistant response to the chat associated with that launch. If several nudges are deferred during nested settlements, each turn is matched to the exact nudge that caused it, even if starts are reordered. If session-usage reporting is enabled, each report uses the same route as its synthesis. TUI-only background work is not forwarded. Completions queued while Pi is busy do not replace the active run's Telegram route.
 
 ## Configuration
 
