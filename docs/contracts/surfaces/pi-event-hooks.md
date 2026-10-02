@@ -2,7 +2,7 @@
 
 ## Boundary and ownership
 
-`pi-ad-hooks/` is a user-global Pi extension for adding request context and running trusted local side effects on public Pi events. Its entry point registers the public `ExtensionAPI.on()` event set from Pi 0.99.0. The extension reads only `<agent-dir>/pi-ad-hooks.json`; project-local hook configuration is not loaded.
+`pi-ad-hooks/` is a user-global Pi extension for adding request context, running trusted local side effects on public Pi events, and explicitly bounded task continuation. Its entry point registers the public `ExtensionAPI.on()` event set from Pi 0.99.0. Declarative hook configuration reads only `<agent-dir>/pi-ad-hooks.json`; project-local hook configuration is not loaded.
 
 ## Configuration and supported events
 
@@ -20,6 +20,8 @@ Scripts receive one version-1 JSON document on stdin: `{ "version": 1, "event": 
 
 Prompt actions outside an active run are skipped with `PROMPT_ACTION_OUTSIDE_RUN`; use scripts for lifecycle events such as `session_start`, `agent_settled`, and `session_shutdown`. Pending prompt text is cleared when a run settles or its session/context is replaced. `project_trust` requires a handler result; this extension returns `{ trusted: "undecided" }` and never grants or denies trust.
 
+**Task continuation** is separately opt-in through `/task start <goal>`. The user can inspect, pause, resume, complete, or stop the task with `/task` commands. The model can update progress, mark completion, or mark the task blocked through a task-only tool. At `agent_before_settle`, an active task with a completed run receives one hidden continuation and requests one next call; task state is persisted in session custom entries and restored from the current branch. Abort/error pauses the task. The fixed limit is 20 automatic continuations; exhaustion pauses and notifies instead of looping. No continuation runs in the background while the session is idle.
+
 ## Failure behavior
 
 Malformed or unreadable configuration, unknown event names, invalid entries, unsupported `system_prompt` event placement, missing Pi system-prompt options, invalid script paths/timeouts, serialization errors, process-launch failures, nonzero exits, and timeouts fail open. Invalid entries are skipped. Stable diagnostic codes include `SYSTEM_PROMPT_EVENT_INVALID` and `SYSTEM_PROMPT_OPTIONS_MISSING`; diagnostics omit hook text, event payloads, process output, stacks, and raw OS errors. Timed-out child processes are terminated. Background scripts are best-effort and may not finish before Pi exits, especially during `session_shutdown`.
@@ -28,11 +30,11 @@ Configuration changes apply after extension reload or session restart.
 
 ## Security and privacy
 
-Scripts run with the Pi user's operating-system permissions and are not sandboxed. They can access files and network resources available to that user. Event payloads may contain private prompts, paths, or tool arguments. Configure only trusted scripts. The extension does not persist or log payloads or process output.
+Scripts run with the Pi user's operating-system permissions and are not sandboxed. They can access files and network resources available to that user. Event payloads may contain private prompts, paths, or tool arguments. Configure only trusted scripts. Task goals and progress are persisted in the local Pi session transcript as extension-owned entries and sent to the configured model as normal user/continuation context. They are not sent as external notifications or written to diagnostic logs.
 
 ## Non-goals
 
-Hooks cannot block, approve, cancel, or rewrite Pi operations. `prompt` is user-style context, while `system_prompt` only appends static text to Pi's existing system prompt for one run; neither replaces Pi's full system prompt. Scripts receive no Pi API/context. Project-local hook configuration, HTTP/MCP/model-based handlers, sandboxing, and automatic support for future/private events are not provided.
+Declarative hooks cannot block, approve, cancel, or rewrite Pi operations. `prompt` is user-style context, while `system_prompt` only appends static text to Pi's existing system prompt for one run; neither replaces Pi's full system prompt. The opt-in task runner requests only bounded continuation through Pi's public settle event; it does not create background workers or apply to ordinary prompts by default. Scripts receive no Pi API/context. Project-local hook configuration, HTTP/MCP/model-based handlers, sandboxing, and automatic support for future/private events are not provided.
 
 ## Related contracts
 

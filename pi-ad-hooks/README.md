@@ -1,6 +1,6 @@
 # pi-ad-hooks
 
-A user-global Pi extension for adding advisory text to model requests or running trusted local scripts when public Pi events occur. It is not an approval layer and cannot block or change Pi operations.
+A user-global Pi extension for adding advisory text to model requests, running trusted local scripts on public Pi events, and explicitly bounded task continuation. Declarative hooks are not an approval layer and cannot block or change Pi operations.
 
 ## Install and configure
 
@@ -20,6 +20,10 @@ Create a minimal configuration:
 ```
 
 Reload the extension after changing the configuration. Use `system_prompt` on `before_agent_start` for a run-wide instruction; it appends to Pi's system prompt without replacing it or creating a user-style message. The separate `prompt` action injects a hidden custom message into request context and is intended for advisory text, not persistent response rules.
+
+## Bounded task continuation
+
+Start an opt-in task with `/task start <goal>`. Use `/task status`, `/task pause`, `/task resume`, `/task done`, or `/task stop` to inspect and control it. While active, Pi requests one additional model call after each successful settle so the task can continue. The `task_update` tool lets the agent record progress, completion, or a blocker requiring user input. Aborted/failed runs pause automatically; after 20 automatic continuations the task pauses and notifies instead of looping indefinitely. Goals and progress are persisted in the local session transcript and sent to the configured model as normal user or continuation context; they are not diagnostic logs or external notifications. State is stored in the current session branch. The feature runs only during an active Pi session—there are no background workers or external notifications.
 
 ## Trust and limits
 
