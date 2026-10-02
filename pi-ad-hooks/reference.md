@@ -51,6 +51,17 @@ A run starts at `input` or, for programmatic input, `before_agent_start`; it end
 
 Prompt hooks outside a run are ignored with `PROMPT_ACTION_OUTSIDE_RUN`. Use scripts for lifecycle notifications such as `session_start` and cleanup such as `session_shutdown`. Prompt hooks cannot start another model request, revise an answer already produced, or override system/developer instructions.
 
+## Bounded task continuation
+
+Task mode is opt-in and is separate from declarative hook configuration:
+
+- `/task start <goal>` persists a task for this session branch and starts its first turn. A nonterminal task must be completed or stopped before another task can replace it; pausing does not permit replacement. Start and resume are rejected while Pi is busy.
+- `/task status` reports the current task and continuation budget. `/task pause` prevents further nudges; `/task resume` starts a new turn; `/task done` and `/task stop` terminate continuation.
+- While active, the `task_update` tool records progress or marks the task `done` or `blocked`. A blocked task waits for the user to resolve it and run `/task resume`.
+- After a completed agent run, `agent_before_settle` appends a hidden continuation message and requests exactly one next call. It does not recursively invoke the agent from `agent_end`. Aborted or errored runs pause automatically.
+- The extension stores versioned task state in custom session entries and restores it from the active branch after reload/resume/tree navigation. Session reload does not start background work.
+- At most 20 automatic continuations are allowed per task. Reaching the cap pauses the task and notifies the user. This fixed bound prevents unbounded token use.
+
 ## Script hooks
 
 A script hook uses a relative `.mjs` path beneath `<agent-dir>/pi-ad-hooks/`. Resolved paths must remain inside that directory, including after symlink resolution. The child receives one JSON document on stdin:
@@ -65,7 +76,7 @@ Scripts run asynchronously and do not delay Pi's event handler. Hooks for the sa
 
 ## Security and diagnostics
 
-Scripts run with the user's operating-system permissions and are not sandboxed. Payloads may contain private prompts, paths, or tool arguments. Configure only trusted scripts. The extension does not persist or log payloads or process output. Diagnostics contain the hook ID, event, stable error code, and limited safe metadata; raw errors, stacks, and script output are omitted.
+Scripts run with the user's operating-system permissions and are not sandboxed. Payloads may contain private prompts, paths, or tool arguments. Configure only trusted scripts. Script payloads and process output are not persisted or logged. Task goals/progress are persisted in the local session transcript and sent to the configured model as normal user/continuation context; they are not sent as external notifications or written to diagnostic logs. Diagnostics contain the hook ID, event, stable error code, and limited safe metadata; raw errors, stacks, and script output are omitted.
 
 `project_trust` hooks do not grant or deny trust. The extension returns Pi's neutral `{ trusted: "undecided" }` result and runs configured actions separately.
 
