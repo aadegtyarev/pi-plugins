@@ -54,7 +54,7 @@ test("task commands show help, persist bare or explicit goals, and control the t
     assert.equal(h.activeTools.has("task_update"), true);
     await h.command("status", h.ctx);
     await h.command("pause", h.ctx);
-    assert.match(h.notifications.at(-1)!, /current Pi run is not cancelled/);
+    assert.match(h.notifications.at(-1)!, /Automatic continuation paused/);
     assert.equal(h.entries.at(-1).data.status, "paused");
     assert.equal(h.entries[0].data.status, "active");
     assert.equal(h.activeTools.has("task_update"), false);
@@ -67,7 +67,7 @@ test("task commands show help, persist bare or explicit goals, and control the t
     await h.command("Replacement", h.ctx);
     assert.equal(h.entries.at(-1).data.goal, "Replacement");
     await h.command("stop", h.ctx);
-    assert.match(h.notifications.at(-1)!, /current Pi run is not cancelled/);
+    assert.match(h.notifications.at(-1)!, /Automatic continuation stopped/);
     assert.equal(h.entries.at(-1).data.status, "stopped");
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
@@ -131,7 +131,7 @@ test("task command errors always point to an actionable recovery", async () => {
     assert.match(h.notifications.at(-1)!, /\/task start <goal>/);
     await h.command("start another goal", h.ctx);
     await h.command("stop", h.ctx);
-    assert.match(h.notifications.at(-1)!, /current Pi run is not cancelled/);
+    assert.match(h.notifications.at(-1)!, /Automatic continuation stopped/);
     await h.command("stop", h.ctx);
     assert.match(h.notifications.at(-1)!, /already stopped/);
     assert.match(h.notifications.at(-1)!, /\/task start <goal>/);
@@ -219,6 +219,30 @@ test("settle continuation is bounded, persisted, and skipped for terminal or fai
     await h.command("resume", h.ctx);
     await h.command("done", h.ctx);
     assert.equal(settle({ outcome: "completed", entries: [], context: {} }, h.ctx), undefined);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("task state controls stay available while busy and distinguish state changes from cancellation", async () => {
+  const h = harness();
+  try {
+    await h.command("start busy-controls goal", h.ctx);
+    h.setIdle(false);
+    await h.command("status", h.ctx);
+    assert.match(h.notifications.at(-1)!, /Current operation is still in progress/);
+    await h.command("pause", h.ctx);
+    assert.equal(h.entries.at(-1).data.status, "paused");
+    assert.match(h.notifications.at(-1)!, /still in progress and will not be cancelled/);
+    await h.command("done", h.ctx);
+    assert.equal(h.entries.at(-1).data.status, "done");
+    assert.match(h.notifications.at(-1)!, /still in progress and will not be cancelled/);
+
+    h.setIdle(true);
+    await h.command("start replacement goal", h.ctx);
+    h.setIdle(false);
+    await h.command("stop", h.ctx);
+    assert.equal(h.entries.at(-1).data.status, "stopped");
+    assert.match(h.notifications.at(-1)!, /wait for it to finish before starting another task/);
+    assert.equal(h.sent.length, 2, "task-state controls do not submit model prompts");
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 

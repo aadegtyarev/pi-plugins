@@ -658,14 +658,26 @@ test("plugin commands are exposed only when available in the Pi session", () => 
     { name: "invalid-name", description: "Pi command using a hyphen", source: "extension" },
     { name: "start", description: "Override built-in", source: "extension" },
     { name: "telegram-reload", description: "Internal command", source: "extension" },
+    { name: "cost", description: "Show usage report", source: "extension" },
+    { name: "task", description: "Task workflow", source: "extension" },
   ];
   assert.deepEqual(getPluginTelegramCommands(commands), [
     { command: "cwd", description: "Show current directory" },
     { command: "workflow", description: "Run workflow" },
     { command: "wt_create", description: "Create a worktree" },
     { command: "invalid_name", description: "Pi command using a hyphen" },
+    { command: "cost", description: "Show usage report" },
+    { command: "task", description: "Task workflow" },
   ]);
-  assert.ok(getTelegramCommandMenu(commands).some((command) => command.command === "wt_create"));
+  const menu = getTelegramCommandMenu(commands);
+  assert.ok(menu.some((command) => command.command === "wt_create"));
+  assert.ok(menu.some((command) => command.command === "cost"));
+  assert.ok(menu.some((command) => command.command === "task"));
+  assert.deepEqual(getPluginTelegramCommand("cost", commands), {
+    command: "cost",
+    piCommand: "cost",
+    description: "Show usage report",
+  });
   assert.deepEqual(getPluginTelegramCommand("wt_create", commands), {
     command: "wt_create",
     piCommand: "wt-create",
@@ -692,16 +704,18 @@ test("Telegram task commands provide help, clear start confirmation, and forward
   process.env.PI_CODING_AGENT_DIR = agentDir;
   const updates = [
     { text: "/task" }, { text: "/task" }, { text: "/task start" }, { text: "/bash hold" },
+    { text: "/task status" }, { text: "/task pause" }, { text: "/task done" },
     { text: '/task start "busy goal"' }, { text: '/task start "Telegram task goal"' },
     { text: "/task status", chatId: 84, userId: 8 },
   ];
   const sent: Array<{ chatId: number; text: string }> = [];
   const userMessages: string[] = [];
-  const branch: any[] = [];
+  const branch: any[] = [{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "Existing Telegram task", progress: "", status: "active", continuations: 0, telegramChatId: 42 } }];
   const activeTools = new Set<string>();
   const emittedTaskRoutes: number[] = [];
   const events = new Map<string, (...args: any[]) => unknown>();
   let updateIndex = 0;
+  let sessionIdle = true;
   let messageId = 0;
   let releaseBash: (() => void) | undefined;
   let allowPostBashUpdates = false;
@@ -714,7 +728,7 @@ test("Telegram task commands provide help, clear start confirmation, and forward
     let result: unknown = true;
     if (method === "getMe") result = { id: 1, is_bot: true, first_name: "test", username: "test_bot" };
     else if (method === "getUpdates" && body.timeout === 0) result = [];
-    else if (method === "getUpdates" && updateIndex === 5 && !allowPostBashUpdates) {
+    else if (method === "getUpdates" && updateIndex === 8 && !allowPostBashUpdates) {
       await postBashUpdates;
       const update = updates[updateIndex]!;
       result = [{ update_id: updateIndex + 1, message: { message_id: updateIndex + 1, from: { id: update.userId ?? 7 }, chat: { id: update.chatId ?? 42, type: "private" }, text: update.text } }];
@@ -750,14 +764,18 @@ test("Telegram task commands provide help, clear start confirmation, and forward
     getActiveTools: () => [...activeTools],
     setActiveTools: (tools: string[]) => { activeTools.clear(); tools.forEach((tool) => activeTools.add(tool)); },
     exec: async (_command: string, args: string[]) => {
-      if (args.at(-1) === "hold") await new Promise<void>((resolve) => { releaseBash = resolve; });
+      if (args.at(-1) === "hold") {
+        sessionIdle = false;
+        await new Promise<void>((resolve) => { releaseBash = resolve; });
+        sessionIdle = true;
+      }
       return { code: 0, killed: false, stdout: "", stderr: "" };
     },
     sendUserMessage(text: string) { userMessages.push(text); if (text === "Telegram task goal") void events.get("agent_start")?.({}); },
   } as unknown as ExtensionAPI;
   const model = { provider: "test-provider", id: "test-model", name: "Test model", reasoning: true };
   const ctx = {
-    cwd: agentDir, model, modelRegistry: { getAvailable: () => [model] }, isIdle: () => true,
+    cwd: agentDir, model, modelRegistry: { getAvailable: () => [model] }, isIdle: () => sessionIdle,
     getContextUsage: () => undefined,
     sessionManager: { getBranch: () => branch, getEntries: () => [], getSessionId: () => "task-session", getSessionFile: () => undefined, getSessionName: () => undefined },
   } as unknown as ExtensionContext;
@@ -776,7 +794,10 @@ test("Telegram task commands provide help, clear start confirmation, and forward
     while ((updateIndex < updates.length || !userMessages.includes("Telegram task goal")) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("/task <goal>") && item.text.includes("/task resume [answer]")), "bare task command returns full help");
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Specify a task goal")), "missing start goal gets actionable usage");
-    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Cannot start or resume the task")), "task start is blocked during another Telegram operation even if Pi reports idle");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Task: active") && item.text.includes("Current operation is still in progress")), "task status remains available during a busy operation");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Automatic continuation paused") && item.text.includes("will not be cancelled")), "pause changes task state without cancelling the active operation");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Task marked complete") && item.text.includes("will not be cancelled")), "done changes task state without cancelling the active operation");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Cannot start or resume the task") && item.text.includes("Wait for the current operation to finish") && !item.text.includes("To replace it")), "start is rejected while busy without suggesting a terminal task be stopped");
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("✅ Task started") && item.text.includes("Telegram task goal")), "accepted start is acknowledged with its goal");
     assert.equal(branch.at(-1).data.telegramChatId, 42, "task state retains its Telegram owner for routing across reloads");
     assert.ok(sent.some((item) => item.chatId === 84 && item.text.includes("another Telegram chat")), "a different authorized chat cannot inspect this task");

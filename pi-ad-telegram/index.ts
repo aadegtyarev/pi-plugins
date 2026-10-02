@@ -929,20 +929,21 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         if ((isStart || action === "resume") && isSessionBusy(ctx)) {
-          const recovery = isStart && isOwnedTask && currentTask
-            ? ` Current task ${currentTask.status}: ${currentTask.goal}. To replace it, use /task stop; this will not cancel the current Pi operation. After it finishes, retry /task start <goal>.${currentTask.status === "blocked" ? " To resume it instead of replacing it, reply with /task resume <answer>." : ""}`
+          const canStopCurrentTask = isStart && isOwnedTask && currentTask && !["done", "stopped"].includes(currentTask.status);
+          const recovery = canStopCurrentTask
+            ? ` Current task ${currentTask.status}: ${currentTask.goal}. To replace it, use /task stop; this will not cancel the current operation. After it finishes, retry /task start <goal>.${currentTask.status === "blocked" ? " To resume it instead of replacing it, reply with /task resume <answer>." : ""}`
             : action === "resume" ? " Check /task status, wait for the current operation to finish, then retry /task resume [answer]."
               : " Wait for the current operation to finish, then retry /task <goal>.";
           await reply(chatId, `Cannot start or resume the task while Pi or Telegram is busy.${recovery}`, signal);
           return;
         }
-        const outcome = runTaskCommand(pi, args, ctx, { telegramChatId: chatId });
+        const outcome = runTaskCommand(pi, args, ctx, { telegramChatId: chatId, operationBusy: isSessionBusy(ctx) });
         if (outcome.prompt) {
           const prompt = outcome.prompt;
           const submitted = await dispatchTask(chatId, prompt, ctx, signal, async (error) => {
             const state = getTaskSummary(ctx);
             const recovery = state?.status === "active"
-              ? runTaskCommand(pi, "pause", ctx).message
+              ? runTaskCommand(pi, "pause", ctx, { operationBusy: isSessionBusy(ctx) }).message
               : state?.status === "blocked" ? "Reply to the blocker with /task resume <answer>."
                 : state?.status === "paused" ? "Resume with /task resume or stop with /task stop."
                   : state && ["done", "stopped"].includes(state.status) ? "The task is complete or stopped; start another with /task start <goal>."

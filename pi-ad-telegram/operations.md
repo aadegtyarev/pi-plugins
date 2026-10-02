@@ -25,7 +25,7 @@ sequenceDiagram
 
 ## Input and offline messages
 
-Ordinary text and attachments use Pi's steering delivery, even during a run. A best-effort 👀 reaction is not an acknowledgement; Telegram has no queue controls. Eligible extension commands dispatch only when Pi is ready; otherwise the bot rejects them with retry guidance.
+Ordinary text and attachments use Pi's steering delivery, even during a run. A best-effort 👀 reaction is not an acknowledgement; Telegram has no queue controls. With `pi-ad-task`, `/task status`, `pause`, `done`, and `stop` are handled immediately during another operation; they inspect or change task state but do not cancel the operation. Busy feedback tells the operator to wait before starting another task. `/task start` and `/task resume`, plus other generic extension commands, require Pi to be ready and are rejected rather than queued.
 
 At startup, or after a network outage reaches the configured threshold (30 seconds by default), updates are grouped by chat into an explicitly stale batch. Pi asks whether ordinary requests remain relevant; stale slash commands are never replayed. If Pi is busy, the batch is rejected, not queued.
 
