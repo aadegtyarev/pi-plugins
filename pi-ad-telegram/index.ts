@@ -7,6 +7,7 @@ import type { BackgroundWorkEvent } from "./background-adapters/types.ts";
 import { AgentBoardPublisher, BackgroundAgentBatch } from "./agent-board.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
 import { getPluginTelegramCommand, getTelegramCommandMenu, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
+import { getTaskSummary, runTaskCommand } from "../pi-ad-hooks/task.ts";
 import { editTelegramMessage, escapeHtml, sendTelegramMessage } from "./message-renderer.ts";
 import { TelegramOutbox } from "./outbox.ts";
 import { formatTelegramReplyContext } from "./reply-context.ts";
@@ -916,6 +917,42 @@ export default function (pi: ExtensionAPI) {
 
     const pluginCommand = command && ctx ? getPluginTelegramCommand(command, pi.getCommands()) : undefined;
     if (pluginCommand && ctx) {
+      if (pluginCommand.piCommand === "task") {
+        const action = args.trim().split(/\s+/, 1)[0]?.toLowerCase();
+        const currentTask = getTaskSummary(ctx);
+        const isOwnedTask = !!currentTask && currentTask.telegramChatId === chatId;
+        const needsTaskState = ["status", "pause", "resume", "done", "stop"].includes(action ?? "") ||
+          (action === "start" && !!currentTask && !["done", "stopped"].includes(currentTask.status));
+        if (currentTask && needsTaskState && !isOwnedTask) {
+          await reply(chatId, "В этой сессии уже есть задача, созданная в Pi или связанном с другим Telegram-чатом. Для защиты её данных управляйте ей в Pi или в исходном чате.", signal);
+          return;
+        }
+        if (["start", "resume"].includes(action ?? "") && isSessionBusy(ctx)) {
+          const recovery = action === "start" && isOwnedTask && currentTask
+            ? ` Текущая задача ${currentTask.status}: ${currentTask.goal}. Чтобы заменить её, используйте /task stop; это не отменит текущий вызов Pi. После его завершения повторите /task start <цель>.${currentTask.status === "blocked" ? " Чтобы продолжить её вместо замены, ответьте: /task resume <ответ>." : ""}`
+            : action === "resume" ? " Проверьте /task status, дождитесь завершения текущей операции и повторите /task resume [ответ]."
+              : " Дождитесь завершения текущей операции и повторите /task start <цель>.";
+          await reply(chatId, `Не могу начать или возобновить задачу: Pi или Telegram сейчас занят.${recovery}`, signal);
+          return;
+        }
+        const outcome = runTaskCommand(pi, args, ctx, { telegramChatId: chatId });
+        if (outcome.prompt) {
+          const prompt = outcome.prompt;
+          const submitted = await dispatchTask(chatId, prompt, ctx, signal, async (error) => {
+            const state = getTaskSummary(ctx);
+            const recovery = state?.status === "active"
+              ? runTaskCommand(pi, "pause", ctx).message
+              : state?.status === "blocked" ? "Ответьте на блокер: /task resume <ответ>."
+                : state?.status === "paused" ? "Возобновить: /task resume, либо остановить: /task stop."
+                  : state && ["done", "stopped"].includes(state.status) ? "Задача завершена/остановлена; следующую можно начать через /task start <цель>."
+                    : "Проверьте /task status; если задачи нет, начните её через /task start <цель>.";
+            await reply(chatId, `Pi не принял задачу: ${String(error)}\n${recovery}`, signal);
+          });
+          if (!submitted) return;
+        }
+        await reply(chatId, outcome.message, signal);
+        return;
+      }
       const taskText = `/${pluginCommand.piCommand}${args ? ` ${args}` : ""}`;
       if (isSessionBusy(ctx)) {
         await reply(chatId, "Pi is busy and cannot handle this slash command now. It was not queued; please send it again when Pi is ready.", signal);
@@ -961,7 +998,13 @@ export default function (pi: ExtensionAPI) {
     await dispatchTask(chatId, taskText, ctx, signal);
   }
 
-  async function dispatchTask(chatId: number, taskText: string, ctx: ExtensionContext, signal: AbortSignal): Promise<void> {
+  async function dispatchTask(
+    chatId: number,
+    taskText: string,
+    ctx: ExtensionContext,
+    signal: AbortSignal,
+    onSubmissionFailure?: (error: unknown) => Promise<void>,
+  ): Promise<boolean> {
     activeChatId = chatId;
     sessionUsageReportChatId = chatId;
     pendingSessionUsageReportChatId = chatId;
@@ -975,18 +1018,29 @@ export default function (pi: ExtensionAPI) {
     toolCalls.clear();
     cancelRequested = false;
     lastAssistantText = "";
-    try {
-      void refreshActivity(chatId, signal);
-      if (signal.aborted) return;
-      pi.sendUserMessage(taskText, { expandPromptTemplates: true, deliverAs: "steer" });
-    } catch (error) {
+    const handleSubmissionFailure = async (error: unknown): Promise<void> => {
       typingIndicator.stop();
-      activeChatId = undefined;
+      if (activeChatId === chatId) activeChatId = undefined;
       if (sessionUsageReportChatId === chatId) sessionUsageReportChatId = undefined;
       if (pendingSessionUsageReportChatId === chatId) pendingSessionUsageReportChatId = undefined;
       if (telegramRunChatId === chatId) telegramRunChatId = undefined;
       if (pendingTelegramRunChatId === chatId) pendingTelegramRunChatId = undefined;
-      await reply(chatId, `Failed to send the task to Pi: ${String(error)}`, signal);
+      activityWorking = false;
+      await deleteActivity(chatId, signal);
+      if (onSubmissionFailure) await onSubmissionFailure(error);
+      else await reply(chatId, `Failed to send the task to Pi: ${String(error)}`, signal);
+    };
+    try {
+      void refreshActivity(chatId, signal);
+      if (signal.aborted) {
+        await handleSubmissionFailure(new Error("Telegram session ended before submission."));
+        return false;
+      }
+      pi.sendUserMessage(taskText, { expandPromptTemplates: true, deliverAs: "steer" });
+      return true;
+    } catch (error) {
+      await handleSubmissionFailure(error);
+      return false;
     }
   }
 
@@ -1348,6 +1402,13 @@ export default function (pi: ExtensionAPI) {
       status: event.isError ? "failed" : "done",
       ...(event.toolName === "bash" ? { exitLabel: exitCode ?? (event.isError ? "error" : "0") } : {}),
     });
+    if (event.toolName.startsWith("task")) {
+      const taskChatId = currentContext ? getTaskSummary(currentContext)?.telegramChatId : undefined;
+      if (taskChatId !== undefined) {
+        const feedback = [`🧭 ${summary}`, resultText || (event.isError ? "Выполнение завершилось ошибкой." : "Команда выполнена.")].join("\n");
+        void reply(taskChatId, feedback, controller.signal);
+      }
+    }
     void refreshActivity(chatId, controller.signal);
   });
 

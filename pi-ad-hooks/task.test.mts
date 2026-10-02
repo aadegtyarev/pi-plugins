@@ -13,6 +13,7 @@ function harness() {
   const entries: any[] = [];
   let branch = entries;
   let idle = true;
+  let sendError: unknown;
   const notifications: string[] = [];
   const sent: string[] = [];
   const activeTools = new Set<string>();
@@ -23,7 +24,7 @@ function harness() {
     appendEntry(customType: string, data: unknown) { branch.push({ type: "custom", customType, data }); },
     getActiveTools() { return [...activeTools]; },
     setActiveTools(names: string[]) { activeTools.clear(); names.forEach(name => activeTools.add(name)); },
-    sendUserMessage(message: string) { sent.push(message); },
+    sendUserMessage(message: string) { if (sendError) throw sendError; sent.push(message); },
   };
   const ctx: any = {
     isIdle: () => idle,
@@ -34,19 +35,26 @@ function harness() {
   process.env.PI_CODING_AGENT_DIR = dir;
   extension(pi);
   if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldDir;
-  return { dir, handlers, command: (args: string, context: any) => command!(args, context), tool: () => tool, entries, notifications, sent, ctx, activeTools, setIdle: (value: boolean) => { idle = value; }, setBranch: (value: any[]) => { branch = value; } };
+  return { dir, handlers, command: (args: string, context: any) => command!(args, context), tool: () => tool, entries, notifications, sent, ctx, activeTools, setIdle: (value: boolean) => { idle = value; }, setSendError: (value: unknown) => { sendError = value; }, setBranch: (value: any[]) => { branch = value; } };
 }
 
-test("task commands persist state, dispatch initial goal, and control task-only tool", async () => {
+test("task commands show help, persist state, dispatch goals, and control the task-only tool", async () => {
   const h = harness();
   try {
-    await h.command("start Ship the feature", h.ctx);
+    await h.command("", h.ctx);
+    assert.match(h.notifications.at(-1)!, /\/task start <цель>/);
+    assert.match(h.notifications.at(-1)!, /20 автоматических продолжений/);
+    await h.command("unknown", h.ctx);
+    assert.match(h.notifications.at(-1)!, /Команды задачи/);
+    await h.command('start "Ship the feature"', h.ctx);
     assert.deepEqual(h.sent, ["Ship the feature"]);
+    assert.match(h.notifications.at(-1)!, /Задача запущена/);
     assert.equal(h.entries.at(-1).customType, "pi-ad-hooks-task");
     assert.equal(h.entries.at(-1).data.status, "active");
     assert.equal(h.activeTools.has("task_update"), true);
     await h.command("status", h.ctx);
     await h.command("pause", h.ctx);
+    assert.match(h.notifications.at(-1)!, /текущий запуск Pi не отменяется/);
     assert.equal(h.entries.at(-1).data.status, "paused");
     assert.equal(h.entries[0].data.status, "active");
     assert.equal(h.activeTools.has("task_update"), false);
@@ -59,7 +67,45 @@ test("task commands persist state, dispatch initial goal, and control task-only 
     await h.command("start Replacement", h.ctx);
     assert.equal(h.entries.at(-1).data.goal, "Replacement");
     await h.command("stop", h.ctx);
+    assert.match(h.notifications.at(-1)!, /текущий запуск Pi не отменяется/);
     assert.equal(h.entries.at(-1).data.status, "stopped");
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("task command errors always point to an actionable recovery", async () => {
+  const h = harness();
+  try {
+    await h.command("resume", h.ctx);
+    assert.match(h.notifications.at(-1)!, /\/task start <цель>/);
+    await h.command("start recovery goal", h.ctx);
+    await h.command("pause", h.ctx);
+    await h.command("pause", h.ctx);
+    assert.match(h.notifications.at(-1)!, /\/task resume/);
+    await h.command("resume", h.ctx);
+    await h.command("done", h.ctx);
+    await h.command("done", h.ctx);
+    assert.match(h.notifications.at(-1)!, /\/task status/);
+    assert.match(h.notifications.at(-1)!, /\/task start <цель>/);
+    await h.command("stop", h.ctx);
+    assert.match(h.notifications.at(-1)!, /уже done/);
+    assert.match(h.notifications.at(-1)!, /\/task start <цель>/);
+    await h.command("start another goal", h.ctx);
+    await h.command("stop", h.ctx);
+    assert.match(h.notifications.at(-1)!, /текущий запуск Pi не отменяется/);
+    await h.command("stop", h.ctx);
+    assert.match(h.notifications.at(-1)!, /уже stopped/);
+    assert.match(h.notifications.at(-1)!, /\/task start <цель>/);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("TUI dispatch failure pauses the task and explains how to recover", async () => {
+  const h = harness();
+  try {
+    h.setSendError(new Error("synthetic rejection"));
+    await h.command("start rejected goal", h.ctx);
+    assert.equal(h.entries.at(-1).data.status, "paused");
+    assert.match(h.notifications.at(-1)!, /не принял задачу/);
+    assert.match(h.notifications.at(-1)!, /\/task resume/);
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
@@ -85,6 +131,24 @@ test("task tool records progress and done/blocked transitions without diagnostic
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
+test("blocked tasks reject replacement with recovery help and resume with the user's answer", async () => {
+  const h = harness();
+  try {
+    await h.command("start awaiting approval", h.ctx);
+    const blockedResult = await h.tool().execute("id", { action: "blocked", note: "waiting for approval" }, undefined, undefined, h.ctx);
+    assert.match(blockedResult.content[0].text, /\/task resume <ответ>/);
+    const stateCount = h.entries.length;
+    await h.command("start replacement", h.ctx);
+    assert.equal(h.entries.length, stateCount);
+    assert.match(h.notifications.at(-1)!, /не запущена/);
+    assert.match(h.notifications.at(-1)!, /\/task resume <ответ на блокер>/);
+    await h.command("resume Подтверждаю scope и merge gate", h.ctx);
+    assert.equal(h.entries.at(-1).data.status, "active");
+    assert.match(h.sent.at(-1)!, /Ответ пользователя: Подтверждаю scope и merge gate/);
+    assert.match(h.notifications.at(-1)!, /Задача возобновлена/);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
 test("settle continuation is bounded, persisted, and skipped for terminal or failed runs", async () => {
   const h = harness();
   try {
@@ -100,7 +164,7 @@ test("settle continuation is bounded, persisted, and skipped for terminal or fai
     const exhausted = settle({ outcome: "completed", entries: [], context: {} }, h.ctx);
     assert.equal(exhausted, undefined);
     assert.equal(h.entries.at(-1).data.status, "paused");
-    assert.match(h.notifications.at(-1), /20 automatic continuations/);
+    assert.match(h.notifications.at(-1)!, /20 автопродолжений/);
     await h.command("resume", h.ctx);
     const failed = settle({ outcome: "error", entries: [], context: {} }, h.ctx);
     assert.equal(failed, undefined);
@@ -123,6 +187,7 @@ test("busy start and resume reject before side effects or unrelated-run continua
   try {
     h.setIdle(false);
     await h.command("start busy goal", h.ctx);
+    assert.match(h.notifications.at(-1)!, /Дождитесь завершения текущего запуска/);
     assert.equal(h.entries.length, 0);
     assert.equal(h.sent.length, 0);
     assert.equal(h.activeTools.has("task_update"), false);
