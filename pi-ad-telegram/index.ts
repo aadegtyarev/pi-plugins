@@ -925,15 +925,15 @@ export default function (pi: ExtensionAPI) {
         const needsTaskState = ["status", "pause", "resume", "done", "stop"].includes(action ?? "") ||
           (isStart && !!currentTask && !["done", "stopped"].includes(currentTask.status));
         if (currentTask && needsTaskState && !isOwnedTask) {
-          await reply(chatId, "В этой сессии уже есть задача, созданная в Pi или связанном с другим Telegram-чатом. Для защиты её данных управляйте ей в Pi или в исходном чате.", signal);
+          await reply(chatId, "This session already has a task created in Pi or associated with another Telegram chat. To protect its data, manage it in Pi or in the originating chat.", signal);
           return;
         }
         if ((isStart || action === "resume") && isSessionBusy(ctx)) {
           const recovery = isStart && isOwnedTask && currentTask
-            ? ` Текущая задача ${currentTask.status}: ${currentTask.goal}. Чтобы заменить её, используйте /task stop; это не отменит текущий вызов Pi. После его завершения повторите /task start <цель>.${currentTask.status === "blocked" ? " Чтобы продолжить её вместо замены, ответьте: /task resume <ответ>." : ""}`
-            : action === "resume" ? " Проверьте /task status, дождитесь завершения текущей операции и повторите /task resume [ответ]."
-              : " Дождитесь завершения текущей операции и повторите /task <цель>.";
-          await reply(chatId, `Не могу начать или возобновить задачу: Pi или Telegram сейчас занят.${recovery}`, signal);
+            ? ` Current task ${currentTask.status}: ${currentTask.goal}. To replace it, use /task stop; this will not cancel the current Pi operation. After it finishes, retry /task start <goal>.${currentTask.status === "blocked" ? " To resume it instead of replacing it, reply with /task resume <answer>." : ""}`
+            : action === "resume" ? " Check /task status, wait for the current operation to finish, then retry /task resume [answer]."
+              : " Wait for the current operation to finish, then retry /task <goal>.";
+          await reply(chatId, `Cannot start or resume the task while Pi or Telegram is busy.${recovery}`, signal);
           return;
         }
         const outcome = runTaskCommand(pi, args, ctx, { telegramChatId: chatId });
@@ -943,11 +943,11 @@ export default function (pi: ExtensionAPI) {
             const state = getTaskSummary(ctx);
             const recovery = state?.status === "active"
               ? runTaskCommand(pi, "pause", ctx).message
-              : state?.status === "blocked" ? "Ответьте на блокер: /task resume <ответ>."
-                : state?.status === "paused" ? "Возобновить: /task resume, либо остановить: /task stop."
-                  : state && ["done", "stopped"].includes(state.status) ? "Задача завершена/остановлена; следующую можно начать через /task start <цель>."
-                    : "Проверьте /task status; если задачи нет, начните её через /task start <цель>.";
-            await reply(chatId, `Pi не принял задачу: ${String(error)}\n${recovery}`, signal);
+              : state?.status === "blocked" ? "Reply to the blocker with /task resume <answer>."
+                : state?.status === "paused" ? "Resume with /task resume or stop with /task stop."
+                  : state && ["done", "stopped"].includes(state.status) ? "The task is complete or stopped; start another with /task start <goal>."
+                    : "Check /task status; if there is no task, start one with /task start <goal>.";
+            await reply(chatId, `Pi could not accept the task: ${String(error)}\n${recovery}`, signal);
           });
           if (!submitted) return;
         }
@@ -1408,7 +1408,7 @@ export default function (pi: ExtensionAPI) {
     if (event.toolName.startsWith("task")) {
       const taskChatId = currentContext ? getTaskSummary(currentContext)?.telegramChatId : undefined;
       if (taskChatId !== undefined) {
-        const feedback = [`🧭 ${summary}`, resultText || (event.isError ? "Выполнение завершилось ошибкой." : "Команда выполнена.")].join("\n");
+        const feedback = [`🧭 ${summary}`, resultText || (event.isError ? "The operation failed." : "The command completed.")].join("\n");
         void reply(taskChatId, feedback, controller.signal);
       }
     }

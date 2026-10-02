@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { collectUsage } from "./usage.ts";
+import { formatSummary } from "./report.ts";
 
 const assistant = (id: string, usage: unknown) => ({ type: "message", id, parentId: null, timestamp: "", message: { role: "assistant", content: [], api: "x", provider: "x", model: "x", usage } }) as never;
 const childEntry = (id: string, customType: string, details: unknown) => ({ type: customType === "subagent-slash-result" ? "custom_message" : "message", id, parentId: null, timestamp: "", ...(customType === "subagent-slash-result" ? { customType, content: "", display: true, details } : { message: { role: "toolResult", toolName: "subagent", details, content: [], toolCallId: "x", isError: false } }) }) as never;
@@ -16,6 +17,10 @@ test("active branch metrics match /status prompt and cache-hit semantics", () =>
   assert.equal(report.parent.total.value, 13579);
   assert.equal(report.parent.cacheHitRate, 4000 / 12345 * 100);
   assert.equal(report.parent.costUsd.value, 0.045);
+  assert.equal(report.rows[0]?.calls, 1);
+  assert.equal(report.rows[0]?.model, "x");
+  assert.equal(report.rows[0]?.effort, null);
+  assert.equal(report.totalCalls, null, "without recognized child results the total invocation count is unknown");
 });
 
 test("child result usage is attributable and duplicate custom/tool result copies count once", () => {
@@ -27,6 +32,8 @@ test("child result usage is attributable and duplicate custom/tool result copies
   assert.equal(report.total.costUsd.complete, false, "child aggregates do not retain field-level provenance");
   assert.equal(report.total.prompt.value, 36);
   assert.equal(report.total.prompt.complete, false);
+  assert.equal(report.rows.find((row) => row.kind === "subagent")?.calls, 1);
+  assert.equal(report.totalCalls, 2);
 });
 
 test("background child schema uses model attempts without double-counting totalCost", () => {
@@ -46,6 +53,24 @@ test("background child schema uses model attempts without double-counting totalC
   assert.equal(report.subagents.cached.value, 50);
   assert.equal(report.subagents.prompt.complete, false);
   assert.ok(report.partial.includes("subagents.input"));
+});
+
+test("multiple model attempts within one child invocation aggregate under one grouped call", () => {
+  const details = {
+    mode: "single",
+    results: [{
+      agent: "reviewer", sessionFile: "/reviewer", modelAttempts: [
+        { model: "model-x", thinking: "high", usage: { input: 10, output: 2, cacheRead: 4, cacheWrite: 1, cost: 0.01 } },
+        { model: "model-x", thinking: "high", usage: { input: 20, output: 3, cacheRead: 8, cacheWrite: 1, cost: 0.02 } },
+      ],
+    }],
+  };
+  const report = collectUsage([childEntry("c", "tool", details)]);
+  const row = report.rows.find((item) => item.kind === "subagent");
+  assert.equal(row?.calls, 1);
+  assert.equal(row?.usage.input.value, 30);
+  assert.equal(row?.usage.output.value, 5);
+  assert.equal(report.totalCalls, 1);
 });
 
 test("background child totalCost fallback exposes only retained categories", () => {
@@ -99,6 +124,8 @@ test("identical child records without a stable identity are counted once and mar
   assert.equal(report.subagents.costUsd.value, 0.01);
   assert.equal(report.subagentCount, null);
   assert.ok(report.partial.includes("subagents.duplicateIdentity"));
+  assert.equal(report.rows.find((row) => row.kind === "subagent")?.calls, null);
+  assert.equal(report.totalCalls, null);
   assert.equal(report.total.costUsd.complete, false);
 });
 
@@ -114,6 +141,27 @@ test("same child session file with conflicting snapshots is not double-counted",
   assert.equal(report.subagents.costUsd.value, 0.01);
   assert.equal(report.subagentCount, null);
   assert.ok(report.partial.includes("subagents.duplicateIdentity"));
+});
+
+test("duplicate child snapshots with conflicting model labels keep attribution ambiguous", () => {
+  const usage = { input: 20, output: 5, cacheRead: 3, cacheWrite: 2, cost: 0.01 };
+  const details = {
+    mode: "parallel",
+    results: [
+      { agent: "reviewer", task: "inspect", sessionFile: "/child", model: "model-a", usage },
+      { agent: "reviewer", task: "inspect", sessionFile: "/child", model: "model-b", usage },
+    ],
+  };
+  const report = collectUsage([childEntry("c", "tool", details)]);
+  assert.equal(report.subagentCount, null);
+  assert.equal(report.totalCalls, null);
+  assert.ok(report.partial.includes("subagents.duplicateIdentity"));
+  const row = report.rows.find((item) => item.kind === "subagent");
+  assert.equal(row?.calls, null);
+  assert.equal(row?.agent, null);
+  assert.equal(row?.provider, null);
+  assert.equal(row?.model, null);
+  assert.match(formatSummary(report), /subagent\/unknown ×— ↑20 ↓5 R3 W2 CH— ~\$0\.01 unknown model • effort unknown/);
 });
 
 test("zero-valued aggregated child fields are unavailable, not known zeros", () => {

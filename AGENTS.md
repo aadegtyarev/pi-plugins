@@ -11,11 +11,12 @@
 ## Project structure
 
 - `pi-ad-telegram/`, `pi-ad-session-usage/`, and `pi-ad-hooks/` are the first-party extensions; their entry points are declared in the root Pi package manifest.
-- `.agents/skills/repo-docs/` contains the project documentation skill and its checker.
+- `.agents/skills/repo-docs/scripts/check_docs.py` is the project-local documentation checker; the reusable `repo-docs` skill is distributed through `ad-pi-addons`.
 - Root `package.json` defines the extension tests, typecheck, and documentation checks.
 
 ## Extension naming and Git workflow
 - Name each first-party Pi extension directory `pi-ad-<name>`; keep extension-owned configuration/script paths consistent with that prefix. Distribute extensions through the root `pi-plugins` package manifest; do not add a parallel bundled copy to another repository.
+- Write extension-authored messages, help, skills, and maintained project documentation in English; use source-verified Mermaid diagrams for architecture or non-trivial flows when they clarify behavior. Follow `docs/contracts/surfaces/pi-extension-authoring.md`.
 - Make repository changes on a topic branch and deliver them through a pull request. Do not commit or push directly to the default branch. Run the repository checks and obtain a read-only review before merging through the PR.
 
 <!-- BEGIN ad-pi-addons contract workflow -->

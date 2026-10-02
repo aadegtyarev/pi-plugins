@@ -197,7 +197,7 @@ def main() -> int:
         dashes = prose.count("—")
         # In Russian the copula dash is grammatically required rather than a
         # hedge, so the threshold is much looser and the kind of dash matters
-        # more than the count. See references/anti-slop.md section 1.
+        # more than the count. See the reusable repo-docs prose checklist.
         letters = re.findall(r"[^\W\d_]", prose, flags=re.UNICODE)
         cyrillic = sum(1 for ch in letters if "\u0400" <= ch <= "\u04ff")
         ru = bool(letters) and cyrillic / len(letters) > 0.3
@@ -205,7 +205,7 @@ def main() -> int:
         if words > 200 and dashes / words > limit:
             tail = (
                 "Russian copula dashes are normal - check the kind, not the count"
-                if ru else "see references/anti-slop.md section 1"
+                if ru else "review the repo-docs prose checklist"
             )
             warnings.append(f"{rel}: {dashes} dashes per {words} words of prose - dense, {tail}")
 

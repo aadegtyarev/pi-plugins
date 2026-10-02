@@ -1,13 +1,32 @@
 # pi-ad-task
 
-Standalone Pi extension for one explicitly opted-in, bounded task per active session branch. It registers `/task`, model-callable task controls, and at most 20 automatic continuations. Task state follows the active branch and does not restart work in the background after reload.
+Manage one operator-approved task on the active Pi session branch. The extension records progress and continues after successful runs, up to 20 times. Failed or aborted runs pause the task; reloading a session never starts work in the background.
 
-## Commands
+## Start and manage a task
 
-- `/task <goal>` starts a task; `/task start <goal>` is an explicit equivalent.
-- `/task status`, `/task pause`, `/task resume [answer]`, `/task done`, `/task stop` inspect or manage it.
-- `/cancel` stops the current Pi operation; an interrupted active task is paused. `/task stop` closes the task without cancelling an in-flight operation.
+```text
+/task <goal>                Start a task
+/task status                See its state and progress
+/task pause                 Pause future continuation
+/task resume [answer]       Resume, optionally answering a blocker
+/task done                  Mark complete
+/task stop                  Stop and free the task slot
+```
 
-The model can also use `task_control` to carry out clear operator requests. It may suggest task mode for substantial scope, but must wait for the operator's agreement before starting. See the bundled [`task-workflow` skill](skills/task-workflow/SKILL.md).
+`/task start <goal>` is an explicit alternative when a goal begins with a reserved command word. `/cancel` aborts the current Pi operation and pauses an active task; `/task stop` does not cancel an in-flight operation.
 
-Task goals/progress are persisted in the local session transcript and sent to the configured model as normal context. There are no background workers or external notifications. Telegram integrations should use the command and tool registrations exposed by this extension; the task's originating private-chat ID is retained for ownership checks when started from Telegram.
+The assistant may suggest task mode for substantial work, but must wait for your agreement. `task_control` carries out your explicit start or management request; `task_update` records progress or a blocker. Only one nonterminal task may exist on a branch. Goals and progress are stored in the session transcript and sent to the configured model as ordinary context.
+
+Telegram tasks retain their originating private-chat ID for ownership checks. There are no external notifications or background workers. See the bundled [`task-workflow` skill](skills/task-workflow/SKILL.md) and [task contract](../docs/contracts/surfaces/pi-ad-task.md).
+
+```mermaid
+stateDiagram-v2
+    [*] --> Active: explicit start
+    Active --> Active: successful step; up to 20 continuations
+    Active --> Blocked: task_update blocked
+    Active --> Paused: failed run, pause, or limit
+    Blocked --> Active: resume with answer
+    Paused --> Active: resume
+    Active --> Done: done
+    Active --> Stopped: stop
+```

@@ -1,14 +1,12 @@
 # pi-ad-telegram
 
-A Pi extension that connects one running Pi session to a private Telegram bot using long polling. It needs no public URL or webhook.
+Connect one running Pi session to a private Telegram bot with long polling. No public URL or webhook is needed.
 
-## Install and start
-
-Install the repository package once from the [root instructions](../README.md). If a standalone copy of this extension is already configured, resolve that duplicate before installing the package; do not delete an unknown extension path.
+## Connect the bot
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and copy its token.
-2. Find your numeric Telegram user ID. Only IDs in the allow-list and private chats are accepted.
-3. Start Pi with the credentials and opt-in flag:
+2. Find your numeric Telegram user ID. Only allow-listed users in private chats can use the bot.
+3. Start Pi with the token, allow-list, and opt-in flag:
 
    ```sh
    export PI_TELEGRAM_BOT_TOKEN='token-from-BotFather'
@@ -16,14 +14,14 @@ Install the repository package once from the [root instructions](../README.md). 
    pi --telegram
    ```
 
-   Alternatively, set `PI_TELEGRAM_ENABLED=1`. The extension is off by default; `/telegram on` enables it in the current session.
-4. Open a private chat with the bot, send `/start`, then send a task.
+   `PI_TELEGRAM_ENABLED=1` is an equivalent opt-in. Without either setting, the bridge is off; `/telegram on` can enable it for the current session.
+4. Open a private chat, send `/start`, then send a task.
 
-Keep the bot token secret. Every allowed Telegram user can issue commands with the Pi process's permissions. In particular, `/bash` runs arbitrary shell commands in the current project.
+Keep the token secret. Every allowed user can issue commands with the Pi process's permissions; in particular, `/bash` runs shell commands in the project.
 
-## Documentation
+## Find a command or setting
 
 - [Bot and Pi commands](commands.md)
-- [Settings and environment variables](configuration.md)
-- [Queues, offline messages, attachments, and delivery](operations.md)
-- [Telegram surface contract](../docs/contracts/surfaces/pi-ad-telegram.md)
+- [Credentials and optional settings](configuration.md)
+- [Input, offline messages, attachments, and delivery](operations.md)
+- [Telegram guarantees and limits](../docs/contracts/surfaces/pi-ad-telegram.md)

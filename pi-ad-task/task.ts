@@ -6,16 +6,16 @@ const MESSAGE_TYPE = "pi-ad-hooks-task-continuation";
 const MAX_CONTINUATIONS = 20;
 
 export const TASK_HELP = [
-  "Команды задачи:",
-  "/task <цель> — начать задачу. Пример: /task Исправить баг и запустить тесты. Для цели, начинающейся с команды, используйте /task start <цель>.",
-  "/task status — показать состояние, цель и прогресс.",
-  "/task pause — не продолжать после текущего запуска Pi; сам запущенный вызов не отменяется.",
-  "/task resume [ответ] — продолжить задачу; добавьте ответ на вопрос/блокер после resume.",
-  "/task done — отметить задачу выполненной.",
-  "/task stop — завершить задачу и освободить место для новой; текущий вызов Pi не отменяется. /cancel останавливает текущий ход и ставит активную задачу на паузу.",
-  "Пока задача active, Pi делает до 20 автоматических продолжений. Модель записывает прогресс через task_update; action=blocked ждёт вашего ответа, done завершает задачу.",
-  "Команды pause, done и stop отключают следующие продолжения, но не отменяют уже идущий вызов модели.",
-  "Пример ответа на блокер: /task resume Подтверждаю выбранный scope. Одновременно поддерживается одна задача: незавершённую сначала resume или stop.",
+  "Task commands:",
+  "/task <goal> — start a task. Example: /task Fix the bug and run tests. If the goal starts with a reserved command, use /task start <goal>.",
+  "/task status — show the task state, goal, and progress.",
+  "/task pause — stop continuation after the current Pi run; it does not cancel that run.",
+  "/task resume [answer] — resume a task; add your answer to a question or blocker after resume.",
+  "/task done — mark the task complete.",
+  "/task stop — close the task and free its slot; this does not cancel an in-flight Pi operation. /cancel stops the current operation and pauses an active task.",
+  "While a task is active, Pi performs up to 20 automatic continuations. The model records progress with task_update; action=blocked waits for your reply, and done completes the task.",
+  "The pause, done, and stop actions prevent further continuations but do not cancel a model call already in progress.",
+  "Blocker reply example: /task resume I approve the proposed scope. Only one task can be active at a time; resume or stop a nonterminal task before starting another.",
 ].join("\n");
 
 type Status = "active" | "paused" | "done" | "stopped" | "blocked";
@@ -74,13 +74,13 @@ function extractGoal(value: string): string {
 }
 
 function taskStatus(state: TaskState | undefined): string {
-  if (!state) return `Задача не записана в этой ветке сессии.\nЧтобы начать: /task <цель>\n\n${TASK_HELP}`;
-  const progress = state.progress || "прогресс ещё не записан";
-  const next = state.status === "blocked" ? "Ответьте на блокер: /task resume <ваш ответ>." :
-    state.status === "paused" ? "Продолжить: /task resume." :
-      state.status === "active" ? "Задача продолжится автоматически после успешного шага." :
-        state.status === "done" ? "Задача завершена." : "Задача остановлена. Можно начать новую через /task start <цель>.";
-  return `Задача: ${state.status}\nЦель: ${state.goal}\nПрогресс: ${progress}\nАвтопродолжения: ${state.continuations}/${MAX_CONTINUATIONS}\n${next}`;
+  if (!state) return `No task is recorded on this session branch.\nTo start one: /task <goal>\n\n${TASK_HELP}`;
+  const progress = state.progress || "No progress recorded yet.";
+  const next = state.status === "blocked" ? "Reply to the blocker: /task resume <your answer>." :
+    state.status === "paused" ? "Resume with /task resume." :
+      state.status === "active" ? "The task will continue automatically after a successful step." :
+        state.status === "done" ? "The task is complete." : "The task is stopped. Start another with /task start <goal>.";
+  return `Task: ${state.status}\nGoal: ${state.goal}\nProgress: ${progress}\nAutomatic continuations: ${state.continuations}/${MAX_CONTINUATIONS}\n${next}`;
 }
 
 export function getTaskSummary(ctx: ExtensionContext): { status: Status; goal: string; telegramChatId?: number } | undefined {
@@ -105,68 +105,68 @@ export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCon
 
   if (action === "start" || !managementActions.includes(action)) {
     const goal = extractGoal(action === "start" ? value : args);
-    if (!goal) return result(`Укажите цель задачи. Пример: /task start "Исправить баг и проверить тестами".\n\n${TASK_HELP}`, "warning");
+    if (!goal) return result(`Specify a task goal. Example: /task start "Fix the bug and run tests".\n\n${TASK_HELP}`, "warning");
     if (!ctx.isIdle()) {
       const canReplace = state && !["done", "stopped"].includes(state.status);
       const recovery = canReplace
-        ? `Дождитесь завершения текущего запуска; чтобы заменить текущую задачу, используйте /task stop, затем /task start <цель>.${state.status === "blocked" ? " Чтобы продолжить её вместо замены, ответьте: /task resume <ответ>." : ""}`
-        : "Дождитесь завершения текущего запуска и повторите /task start <цель>.";
-      return result(`Нельзя начать задачу, пока Pi занят. ${recovery}${canReplace ? ` Текущая задача: ${state.status} — ${state.goal}.` : ""}`, "warning");
+        ? `Wait for the current run to finish. To replace the current task, use /task stop, then /task start <goal>.${state.status === "blocked" ? " To continue it instead, reply with /task resume <answer>." : ""}`
+        : "Wait for the current run to finish, then retry /task start <goal>.";
+      return result(`Cannot start a task while Pi is busy. ${recovery}${canReplace ? ` Current task: ${state.status} — ${state.goal}.` : ""}`, "warning");
     }
     if (state && !["done", "stopped"].includes(state.status)) {
-      const recover = state.status === "blocked" ? "/task resume <ответ на блокер> или /task stop, затем /task start <новая цель>." :
-        state.status === "paused" ? "/task resume или /task stop, затем /task start <новая цель>." :
-          "Дождитесь завершения текущего запуска или выполните /task stop, затем /task start <новая цель>.";
-      return result(`Новая задача не запущена: уже есть задача со статусом ${state.status}: ${state.goal}\n${recover}`, "warning");
+      const recover = state.status === "blocked" ? "/task resume <blocker answer> or /task stop, then /task start <new goal>." :
+        state.status === "paused" ? "/task resume or /task stop, then /task start <new goal>." :
+          "Wait for the current run to finish or use /task stop, then /task start <new goal>.";
+      return result(`Task not started: a task is already ${state.status}: ${state.goal}\n${recover}`, "warning");
     }
     const next: TaskState = { version: 1, goal, progress: "", status: "active", continuations: 0, ...(options.telegramChatId === undefined ? {} : { telegramChatId: options.telegramChatId }) };
     persist(pi, next);
     expose(pi, true);
-    return result(`✅ Задача запущена.\nЦель: ${goal}\nИспользуйте /task status для проверки, /task pause для паузы или /task stop для остановки.`, "info", goal);
+    return result(`✅ Task started.\nGoal: ${goal}\nUse /task status to check progress, /task pause to pause, or /task stop to stop.`, "info", goal);
   }
 
   if (action === "resume") {
-    if (!state) return result("Нечего возобновлять. Начните задачу командой /task <цель>.", "warning");
+    if (!state) return result("There is no task to resume. Start one with /task <goal>.", "warning");
     if (!["paused", "blocked"].includes(state.status)) {
-      const next = state.status === "active" ? "Задача уже выполняется; используйте /task status." : `Задача ${state.status} и не возобновляется. Для новой задачи: /task <цель>.`;
+      const next = state.status === "active" ? "The task is already active; use /task status." : `The task is ${state.status} and cannot be resumed. Start a new task with /task <goal>.`;
       return result(next, "warning");
     }
-    if (!ctx.isIdle()) return result("Нельзя возобновить задачу, пока Pi занят. Проверьте /task status, дождитесь завершения текущего запуска и повторите /task resume [ответ].", "warning");
+    if (!ctx.isIdle()) return result("Cannot resume a task while Pi is busy. Check /task status, wait for the current run to finish, then retry /task resume [answer].", "warning");
     state.status = "active";
     persist(pi, state);
     expose(pi, true);
-    const response = value ? `\nОтвет пользователя: ${value}` : "";
+    const response = value ? `\nUser response: ${value}` : "";
     const prompt = `Continue the task: ${state.goal}${state.progress ? `\nLatest progress: ${state.progress}` : ""}${response}`;
-    return result(`▶️ Задача возобновлена.${value ? " Ваш ответ добавлен к контексту." : ""}\nЦель: ${state.goal}`, "info", prompt);
+    return result(`▶️ Task resumed.${value ? " Your answer was added to the context." : ""}\nGoal: ${state.goal}`, "info", prompt);
   }
 
-  if (!state) return result(`Нет активной задачи для команды /task ${action}. Начните её: /task start <цель>.`, "warning");
+  if (!state) return result(`There is no active task for /task ${action}. Start one with /task start <goal>.`, "warning");
   if (action === "pause") {
     if (state.status !== "active") {
-      const recovery = state.status === "blocked" ? "Ответьте на блокер: /task resume <ответ>, либо /task stop." :
-        state.status === "paused" ? "Задача уже на паузе: /task resume или /task stop." :
-          `Задача уже ${state.status}; новую можно начать командой /task start <цель>.`;
-      return result(`Нельзя поставить на паузу задачу со статусом ${state.status}. ${recovery}`, "warning");
+      const recovery = state.status === "blocked" ? "Reply to the blocker with /task resume <answer>, or use /task stop." :
+        state.status === "paused" ? "The task is already paused; use /task resume or /task stop." :
+          `The task is already ${state.status}; start another with /task start <goal>.`;
+      return result(`Cannot pause a task with status ${state.status}. ${recovery}`, "warning");
     }
     state.status = "paused";
     persist(pi, state);
     expose(pi, false);
-    return result(`⏸ Автопродолжение приостановлено; текущий запуск Pi не отменяется. Возобновить: /task resume.\nЦель: ${state.goal}`);
+    return result(`⏸ Automatic continuation paused; the current Pi run is not cancelled. Resume with /task resume.\nGoal: ${state.goal}`);
   }
   if (action === "done") {
-    if (state.status === "done") return result("Задача уже завершена. Проверьте /task status или начните новую: /task start <цель>.", "warning");
-    if (state.status === "stopped") return result("Остановленную задачу нельзя завершить. Начните новую: /task start <цель>.", "warning");
+    if (state.status === "done") return result("The task is already complete. Check /task status or start another with /task start <goal>.", "warning");
+    if (state.status === "stopped") return result("A stopped task cannot be marked complete. Start another with /task start <goal>.", "warning");
     state.status = "done";
     persist(pi, state);
     expose(pi, false);
-    return result(`✅ Задача отмечена выполненной.\nЦель: ${state.goal}`);
+    return result(`✅ Task marked complete.\nGoal: ${state.goal}`);
   }
   if (action === "stop") {
-    if (["done", "stopped"].includes(state.status)) return result(`Задача уже ${state.status}; останавливать больше нечего. Чтобы начать новую: /task start <цель>.`, "warning");
+    if (["done", "stopped"].includes(state.status)) return result(`The task is already ${state.status}; there is nothing to stop. Start another with /task start <goal>.`, "warning");
     state.status = "stopped";
     persist(pi, state);
     expose(pi, false);
-    return result(`⏹ Автопродолжение остановлено; текущий запуск Pi не отменяется. Теперь можно начать новую: /task start <цель>.\nПредыдущая цель: ${state.goal}`);
+    return result(`⏹ Automatic continuation stopped; the current Pi run is not cancelled. You can now start another task with /task start <goal>.\nPrevious goal: ${state.goal}`);
   }
   return result(TASK_HELP, "warning");
 }
@@ -196,36 +196,36 @@ export function registerTaskContinuation(pi: ExtensionAPI): void {
       const state = current(ctx);
       const canReplaceTerminalTask = params.action === "start" && state && ["done", "stopped"].includes(state.status);
       if (telegramChatId !== undefined && state && state.telegramChatId !== telegramChatId && !canReplaceTerminalTask) {
-        return { content: [{ type: "text", text: "Задачей из этого Telegram-чата управлять нельзя: она создана в Pi или принадлежит другому чату. Используйте исходный чат или управляйте задачей в Pi." }], details: undefined, isError: true };
+        return { content: [{ type: "text", text: "This Telegram chat cannot manage the task because it was created in Pi or belongs to another chat. Use the originating chat or manage the task in Pi." }], details: undefined, isError: true };
       }
       if (params.action === "status") return { content: [{ type: "text", text: taskStatus(state) }], details: undefined };
       if (params.action === "start") {
         const goal = params.goal?.trim();
-        if (!goal) return { content: [{ type: "text", text: "Для старта укажите goal; оператор должен явно попросить запустить задачу." }], details: undefined, isError: true };
-        if (state && !["done", "stopped"].includes(state.status)) return { content: [{ type: "text", text: `Уже есть задача со статусом ${state.status}: ${state.goal}. Сначала продолжите её или остановите командой /task stop.` }], details: undefined, isError: true };
+        if (!goal) return { content: [{ type: "text", text: "Provide a goal to start a task; the operator must explicitly request that it be started." }], details: undefined, isError: true };
+        if (state && !["done", "stopped"].includes(state.status)) return { content: [{ type: "text", text: `A task is already ${state.status}: ${state.goal}. Resume it or stop it with /task stop before starting another.` }], details: undefined, isError: true };
         const next: TaskState = { version: 1, goal, progress: "", status: "active", continuations: 0, ...(telegramChatId === undefined ? {} : { telegramChatId }) };
         persist(pi, next);
         expose(pi, true);
-        return { content: [{ type: "text", text: `Задача запущена: ${goal}. Работайте над этой целью и записывайте этапы через task_update.` }], details: undefined };
+        return { content: [{ type: "text", text: `Task started: ${goal}. Work toward this goal and record progress with task_update.` }], details: undefined };
       }
-      if (!state) return { content: [{ type: "text", text: "Активной задачи нет. Для старта дождитесь явной просьбы оператора и вызовите task_control с action=start." }], details: undefined, isError: true };
+      if (!state) return { content: [{ type: "text", text: "There is no active task. To start one, wait for an explicit operator request and call task_control with action=start." }], details: undefined, isError: true };
       if (params.action === "pause") {
-        if (state.status !== "active") return { content: [{ type: "text", text: `Нельзя поставить на паузу задачу со статусом ${state.status}. Проверьте status или возобновите заблокированную задачу.` }], details: undefined, isError: true };
+        if (state.status !== "active") return { content: [{ type: "text", text: `Cannot pause a task with status ${state.status}. Check its status or resume a blocked task.` }], details: undefined, isError: true };
         state.status = "paused";
       } else if (params.action === "resume") {
-        if (!["paused", "blocked"].includes(state.status)) return { content: [{ type: "text", text: `Нельзя возобновить задачу со статусом ${state.status}.` }], details: undefined, isError: true };
+        if (!["paused", "blocked"].includes(state.status)) return { content: [{ type: "text", text: `Cannot resume a task with status ${state.status}.` }], details: undefined, isError: true };
         state.status = "active";
-        if (params.note?.trim()) state.progress = `${state.progress}${state.progress ? "\\n" : ""}Ответ пользователя: ${params.note.trim()}`;
+        if (params.note?.trim()) state.progress = `${state.progress}${state.progress ? "\\n" : ""}User response: ${params.note.trim()}`;
       } else if (params.action === "done") {
-        if (["done", "stopped"].includes(state.status)) return { content: [{ type: "text", text: `Задача уже ${state.status}.` }], details: undefined, isError: true };
+        if (["done", "stopped"].includes(state.status)) return { content: [{ type: "text", text: `The task is already ${state.status}.` }], details: undefined, isError: true };
         state.status = "done";
       } else if (params.action === "stop") {
-        if (["done", "stopped"].includes(state.status)) return { content: [{ type: "text", text: `Задача уже ${state.status}.` }], details: undefined, isError: true };
+        if (["done", "stopped"].includes(state.status)) return { content: [{ type: "text", text: `The task is already ${state.status}.` }], details: undefined, isError: true };
         state.status = "stopped";
       }
       persist(pi, state);
       expose(pi, state.status === "active");
-      return { content: [{ type: "text", text: `Задача ${state.status}: ${state.goal}${params.note ? `\\n${params.note}` : ""}` }], details: undefined };
+      return { content: [{ type: "text", text: `Task ${state.status}: ${state.goal}${params.note ? `\\n${params.note}` : ""}` }], details: undefined };
     },
   });
 
@@ -242,19 +242,19 @@ export function registerTaskContinuation(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _update, ctx: ExtensionToolContext) {
       const state = current(ctx);
-      if (!state) return { content: [{ type: "text", text: "Нет активной задачи для обновления. Начните её командой /task start <цель>." }], details: undefined, isError: true };
+      if (!state) return { content: [{ type: "text", text: "There is no active task to update. Start one with /task start <goal>." }], details: undefined, isError: true };
       if (state.status !== "active") {
         const recovery = ["paused", "blocked"].includes(state.status)
-          ? (state.status === "blocked" ? "Ответьте на блокер: /task resume <ответ>." : "Возобновите задачу: /task resume.")
-          : `Задача уже ${state.status}; начните новую: /task start <цель>.`;
-        return { content: [{ type: "text", text: `Нельзя обновить задачу со статусом ${state.status}. ${recovery}` }], details: undefined, isError: true };
+          ? (state.status === "blocked" ? "Reply to the blocker with /task resume <answer>." : "Resume the task with /task resume.")
+          : `The task is already ${state.status}; start another with /task start <goal>.`;
+        return { content: [{ type: "text", text: `Cannot update a task with status ${state.status}. ${recovery}` }], details: undefined, isError: true };
       }
       state.progress = params.note?.trim() || state.progress;
       if (params.action === "done") state.status = "done";
       if (params.action === "blocked") state.status = "blocked";
       persist(pi, state);
       expose(pi, state.status === "active");
-      const guidance = state.status === "blocked" ? " Use /task resume <ответ> to answer and continue, or /task stop to stop." :
+      const guidance = state.status === "blocked" ? " Use /task resume <answer> to answer and continue, or /task stop to stop." :
         state.status === "done" ? " The task is complete." : "";
       return { content: [{ type: "text", text: `Task ${state.status}${state.progress ? `: ${state.progress}` : "."}${guidance}` }], details: undefined };
     },
@@ -273,13 +273,13 @@ export function continueTask(pi: ExtensionAPI, event: import("@earendil-works/pi
   if (event.outcome !== "completed") {
     state.status = "paused";
     persist(pi, state); expose(pi, false);
-    ctx.ui.notify(`Задача поставлена на паузу: запуск завершился со статусом ${event.outcome}. Проверьте /task status и продолжите через /task resume [ответ].`, "warning");
+    ctx.ui.notify(`Task paused because the Pi run ended with outcome ${event.outcome}. Check /task status and continue with /task resume [answer].`, "warning");
     return;
   }
   if (state.continuations >= MAX_CONTINUATIONS) {
     state.status = "paused";
     persist(pi, state); expose(pi, false);
-    ctx.ui.notify(`Задача приостановлена после ${MAX_CONTINUATIONS} автопродолжений. Проверьте прогресс командой /task status; для следующего шага используйте /task resume [ответ].`, "warning");
+    ctx.ui.notify(`Task paused after ${MAX_CONTINUATIONS} automatic continuations. Check progress with /task status; use /task resume [answer] to continue.`, "warning");
     return;
   }
   state.continuations++;

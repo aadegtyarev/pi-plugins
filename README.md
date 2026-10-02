@@ -1,37 +1,43 @@
 # Pi plugins
 
-Four first-party Pi extensions, distributed together as a Git package: a Telegram bridge, session-usage reporting, event hooks, and bounded task continuation.
+A Telegram bridge, usage reports, event hooks, and bounded task continuation for one Pi session.
 
 ## Install
 
-The repository is private. Make sure GitHub access is configured, then run:
+Configure GitHub access to install this private package:
 
 ```sh
 pi install git:github.com/aadegtyarev/pi-plugins
 ```
 
-The package exposes all four extensions. If any are already loaded from standalone files or symlinks, resolve that duplicate before installing the package. Do not remove an existing extension path until you have confirmed what it points to.
+If a standalone copy or symlink of an extension is already loaded, resolve it before installing; do not remove an unknown path. Review the source before enabling extensions: they run with the Pi process's permissions. Telegram additionally requires a bot token and explicit startup opt-in.
 
-Extensions run with the permissions of the Pi process. Review the source and the security notes for the extensions you enable. Telegram also requires a bot token and an explicit startup opt-in.
+## Choose an extension
 
-## Extensions
+| Extension | Start here |
+|---|---|
+| `pi-ad-telegram` | [Connect a private Telegram bot](pi-ad-telegram/README.md); then see [commands](pi-ad-telegram/commands.md), [settings](pi-ad-telegram/configuration.md), and [delivery](pi-ad-telegram/operations.md). |
+| `pi-ad-session-usage` | Request a deterministic [`/cost`](pi-ad-session-usage/README.md) report or ask for `session_usage_report`. |
+| `pi-ad-hooks` | [Add advisory request context or trusted event scripts](pi-ad-hooks/README.md); see the [configuration reference](pi-ad-hooks/reference.md). |
+| `pi-ad-task` | [Start and manage one bounded task](pi-ad-task/README.md); the [task-workflow skill](pi-ad-task/skills/task-workflow/SKILL.md) guides the assistant. |
 
-| Extension | What it does | Read next |
-|---|---|---|
-| `pi-ad-telegram` | Connects one Pi session to a private Telegram bot. | [Setup](pi-ad-telegram/README.md), [commands](pi-ad-telegram/commands.md), [settings](pi-ad-telegram/configuration.md), [delivery behavior](pi-ad-telegram/operations.md) |
-| `pi-ad-session-usage` | Reports active-branch token usage and Pi-estimated cost. | [README](pi-ad-session-usage/README.md), [surface contract](docs/contracts/surfaces/session-usage-reporting.md) |
-| `pi-ad-hooks` | Adds advisory prompt context or runs trusted local scripts on public Pi events. | [Setup](pi-ad-hooks/README.md), [configuration and event reference](pi-ad-hooks/reference.md) |
-| `pi-ad-task` | Manages one operator-approved task with bounded continuation and natural-language controls. | [README](pi-ad-task/README.md), [task workflow skill](pi-ad-task/skills/task-workflow/SKILL.md) |
+## One session, separate responsibilities
+
+```mermaid
+flowchart LR
+    Operator[Operator] -->|private messages and commands| Telegram[Telegram bridge]
+    Telegram -->|input or direct command| Pi[Pi session]
+    Operator -->|trusted local event actions| Hooks[Event hooks]
+    Hooks -->|context or script| Pi
+    Operator -->|explicit task request| Task[Bounded task]
+    Task -->|continuation| Pi
+    Operator -->|/cost or usage question| Usage[Usage report]
+    Usage -->|visible report| Pi
+    Pi -->|Telegram-originated /cost only| Telegram
+```
+
+Ordinary Telegram input enters Pi; hooks add context or run local scripts, and tasks continue only by operator approval. Usage reports are on demand; Telegram forwards only a `/cost` requested in that chat.
 
 ## Development
 
-Node.js and npm are needed for repository checks. From the repository root:
-
-```sh
-npm install
-npm test
-npm run typecheck
-npm run docs:check
-```
-
-See [`AGENTS.md`](AGENTS.md) for project workflow and contract requirements. The [`docs/contracts/surfaces/`](docs/contracts/surfaces/) pages define the current behavior and limits of each extension.
+From the repository root, run `npm install`, then `npm test`, `npm run typecheck`, and `npm run docs:check`. See [AGENTS.md](AGENTS.md) for contributor workflow and [`docs/contracts/surfaces/`](docs/contracts/surfaces/) for behavior and limits.

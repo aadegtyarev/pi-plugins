@@ -2,12 +2,12 @@
 
 ## Boundary and ownership
 
-`pi-ad-task/` is the standalone first-party Pi extension for one explicitly opted-in, bounded task per active session branch. It registers `/task`, model-callable task tools, branch restoration, and continuation at Pi's public agent settle event. It is included in the canonical `pi-plugins` package. Declarative hooks are separately owned by `pi-ad-hooks`.
+`pi-ad-task/` is the standalone first-party Pi extension for one explicitly opted-in, bounded task per active session branch. It registers `/task`, model-callable task tools, branch restoration, and continuation at Pi's public agent settle event. It is included in the canonical `pi-plugins` package. Operator-facing help, command feedback, and tool-authored explanations are in English; goals, progress, and user replies remain user data and are preserved. Declarative hooks are separately owned by `pi-ad-hooks`.
 
 ## Inputs and behavior
 
 - `/task <goal>` starts a task; `/task start <goal>` is an explicit form for goals beginning with reserved management words. `/task` with no arguments shows help. `/task status`, `pause`, `resume [answer]`, `done`, and `stop` inspect/control the task.
-- A model-callable `task_control` tool carries out clear operator requests to start/status/pause/resume/done/stop. A start requires an explicit operator request; the assistant can suggest task mode for substantial scope but must wait for agreement. `task_update` records progress, done, or blocked states.
+- A model-callable `task_control` tool carries out clear operator requests to start/status/pause/resume/done/stop. A start requires an explicit operator request; the assistant can suggest task mode for substantial scope but must wait for agreement. `task_update` records progress, done, or blocked states. The bundled task-workflow skill says to report state changes only after tool confirmation and to mark a task done only when its goal is complete.
 - Exactly one task may be nonterminal on a branch. A new start is refused until the current task is stopped or terminal. Task transitions are validated by the extension.
 - After a completed run, an active task receives one hidden continuation. Failed/aborted runs pause it. At most 20 automatic continuations are allowed. Session load/tree navigation restores state but never starts background work.
 - `/cancel` remains Pi's current-operation cancellation. An aborted active task is paused. `/task stop` closes the task and frees the single-task slot but does not cancel an in-flight Pi operation.

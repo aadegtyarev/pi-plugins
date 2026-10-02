@@ -2,7 +2,7 @@
 
 ## Boundary and ownership
 
-`pi-ad-hooks/` is a user-global Pi extension for adding request context and running trusted local side effects on public Pi events. Its entry point registers the public `ExtensionAPI.on()` event set from Pi 0.99.0. Declarative hook configuration reads only `<agent-dir>/pi-ad-hooks.json`; project-local hook configuration is not loaded. Bounded task continuation is owned separately by [`pi-ad-task`](pi-ad-task.md).
+`pi-ad-hooks/` is a user-global Pi extension for adding request context and running trusted local side effects on public Pi events. Its entry point registers the public `ExtensionAPI.on()` event set from Pi 0.99.0. Maintained hook help and documentation are in English; configured hook text is operator-provided data and is used verbatim. Declarative hook configuration reads only `<agent-dir>/pi-ad-hooks.json`; project-local hook configuration is not loaded. Bounded task continuation is owned separately by [`pi-ad-task`](pi-ad-task.md).
 
 ## Configuration and supported events
 

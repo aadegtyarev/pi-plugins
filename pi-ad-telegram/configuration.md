@@ -1,45 +1,39 @@
 # Telegram configuration
 
-## Credentials and startup
+## Credentials and opt-in
 
-Credentials stay in environment variables, not in the settings file:
+Set credentials in the environment, not the settings file:
 
-| Variable / flag | Purpose |
+| Variable or flag | Purpose |
 |---|---|
-| `PI_TELEGRAM_BOT_TOKEN` | Telegram bot token from BotFather. Treat it as a secret. |
-| `PI_TELEGRAM_ALLOWED_USER_IDS` | Comma-separated numeric Telegram user IDs allowed to use the bot. |
-| `PI_TELEGRAM_ENABLED=1` | Opt in at startup. |
-| `--telegram` | Equivalent startup opt-in flag. |
+| `PI_TELEGRAM_BOT_TOKEN` | Secret token from BotFather. |
+| `PI_TELEGRAM_ALLOWED_USER_IDS` | Comma-separated numeric user IDs allowed to use the bot. |
+| `PI_TELEGRAM_ENABLED=1` or `--telegram` | Enable polling at startup. |
 
-Without the opt-in, polling is off. `/telegram on` and `/telegram off` change it for the current session. Leave the opt-in unset in child Pi processes to avoid competing polling connections.
+Without opt-in, polling is off. `/telegram on` and `/telegram off` change it for the current session. Leave the opt-in unset in child Pi processes to avoid competing pollers.
 
 ## Optional settings
 
-Settings are read at `session_start` from `<PI_CODING_AGENT_DIR>/pi-ad-telegram.json`, or `~/.pi/agent/pi-ad-telegram.json` if `PI_CODING_AGENT_DIR` is unset. A missing file uses these defaults. Create it with owner-only permissions, such as `chmod 600 ~/.pi/agent/pi-ad-telegram.json`.
+Pi reads `<PI_CODING_AGENT_DIR>/pi-ad-telegram.json` at `session_start`; without `PI_CODING_AGENT_DIR`, it uses `~/.pi/agent/pi-ad-telegram.json`. A missing file uses defaults. Restrict file access, for example: `chmod 600 ~/.pi/agent/pi-ad-telegram.json`.
 
-| Key | Default | Meaning |
+| Key | Default | Purpose |
 |---|---:|---|
 | `longPollTimeoutSeconds` | `20` | Telegram long-poll timeout. |
-| `staleBacklogThresholdMs` | `30000` | Outage duration after which recovered messages are treated as stale. |
-| `messageChunkLimit` | `3500` | Internal target for message chunks. |
+| `staleBacklogThresholdMs` | `30000` | Outage duration before recovered messages are treated as stale. |
+| `messageChunkLimit` | `3500` | Internal message-chunk target. |
 | `retryBaseDelayMs` / `retryMaxDelayMs` | `1000` / `30000` | Retry backoff bounds. |
-| `agentBoardRefreshIntervalMs` | `15000` | Background-agent status refresh interval. |
+| `agentBoardRefreshIntervalMs` | `15000` | Background-agent board refresh interval. |
 | `typingRefreshIntervalMs` | `4000` | Typing-action refresh interval. |
 | `commandTimeoutMs` | `120000` | Maximum `/bash` runtime. |
-| `shutdownCleanupTimeoutMs` | `5000` | Bound for activity cleanup at shutdown. |
-| `activityHistoryLimit` / `activityTextLimit` | `35` / `550` | Maximum activity rows and summary characters. |
-| `backgroundTaskPreviewLimit` | `82` | Maximum background task-preview characters. |
+| `shutdownCleanupTimeoutMs` | `5000` | Shutdown-cleanup bound. |
+| `activityHistoryLimit` / `activityTextLimit` | `35` / `550` | Maximum timeline rows and summary characters. |
+| `backgroundTaskPreviewLimit` | `82` | Maximum task-preview characters. |
 | `outboxPath` | `<agent-dir>/telegram-outbox.json` | Durable buffer for outgoing text sends and edits. |
 
 Example:
 
 ```json
-{
-  "longPollTimeoutSeconds": 20,
-  "outboxPath": "telegram-outbox.json"
-}
+{ "longPollTimeoutSeconds": 20, "outboxPath": "telegram-outbox.json" }
 ```
 
-Only include values you want to override. Unknown keys and invalid types or ranges are reported as errors. Relative `outboxPath` values resolve under the agent directory. The settings file must not contain the token, allowed-user IDs, or startup opt-in.
-
-Settings are loaded when the extension starts for a session. Start a new Pi session after editing the file; `/reload` reloads resources but does not reload these session-start settings.
+Only override values you need. Unknown keys, invalid types, and out-of-range values are errors. Relative `outboxPath` values resolve under the agent directory. Do not put the token, user IDs, or startup opt-in in this file. Settings load at session start: start a new session after editing; `/reload` does not reload them.
