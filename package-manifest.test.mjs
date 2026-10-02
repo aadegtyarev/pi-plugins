@@ -21,6 +21,12 @@ test("Pi package exposes exactly the four first-party extensions and task skill"
   assert.equal(existsSync(path.join(root, "pi-ad-task/skills/task-workflow/SKILL.md")), true);
 });
 
+test("task workflow skill requires confirmed transitions and goal completion", () => {
+  const skill = readFileSync(path.join(root, "pi-ad-task/skills/task-workflow/SKILL.md"), "utf8");
+  assert.match(skill, /Do not report a state change until the tool confirms it/);
+  assert.match(skill, /mark the task done only when its goal is complete/);
+});
+
 test("Pi runtime packages are peers and are not runtime dependencies", () => {
   for (const name of ["@earendil-works/pi-ai", "@earendil-works/pi-coding-agent"]) {
     assert.equal(pkg.peerDependencies?.[name], "*");

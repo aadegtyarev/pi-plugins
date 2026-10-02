@@ -1,5 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { collectUsage } from "./usage.ts";
 import { diagnosticName, ERROR_CODES, formatSummary, formatToolContent, SAFE_ERRORS } from "./report.ts";
 
@@ -14,8 +14,8 @@ function visibleFailure(pi: ExtensionAPI, text: string): void {
 export default function sessionUsageExtension(pi: ExtensionAPI): void {
   pi.registerTool(defineTool({
     name: "session_usage_report",
-    label: "Session usage report",
-    description: "Report measured token usage and cost for the active session branch, including available direct subagent results. Missing data is identified explicitly. This is an estimate, not a provider invoice.",
+    label: "Session cost report",
+    description: "When the operator asks about session costs or usage, return the compact active-branch report and structured per-model/per-subagent metrics. Use these Pi-recorded figures instead of reading transcript files; reply with the compact report without unrelated task commentary. Cost is an estimate, not a provider invoice.",
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       try {
@@ -27,13 +27,17 @@ export default function sessionUsageExtension(pi: ExtensionAPI): void {
       }
     },
   }));
-  pi.on("agent_settled", async (_event, ctx) => {
-    try {
-      const report = collectUsage(ctx.sessionManager.getBranch());
-      pi.sendMessage({ customType: CUSTOM_TYPE, content: formatSummary(report), display: true, details: report }, { triggerTurn: false });
-    } catch (error) {
-      logFailure("agent_settled", ERROR_CODES.automatic, error);
-      visibleFailure(pi, SAFE_ERRORS.automatic);
-    }
+
+  pi.registerCommand("cost", {
+    description: "Show a compact cost and cache report for this session",
+    async handler(_args: string, _ctx: ExtensionCommandContext) {
+      try {
+        const report = collectUsage(_ctx.sessionManager.getBranch());
+        pi.sendMessage({ customType: CUSTOM_TYPE, content: formatSummary(report), display: true, details: report }, { triggerTurn: false });
+      } catch (error) {
+        logFailure("command", ERROR_CODES.command, error);
+        visibleFailure(pi, SAFE_ERRORS.command);
+      }
+    },
   });
 }

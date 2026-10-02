@@ -1,11 +1,31 @@
 # pi-ad-session-usage
 
-Reports token usage and Pi-estimated USD cost for the active session branch.
+See what Pi recorded for the active session branch—without asking a model to explain the bill.
 
-## Use
+## Request a report
 
-Install the repository package using the [root instructions](../README.md). The extension registers the model-callable `session_usage_report` tool and posts a separate visible summary after each settled run without starting another model turn.
+Install `pi-plugins` from the [root instructions](../README.md), then use:
 
-The automatic summary is a detailed, multi-line report: prompt tokens with cached/uncached breakdown, output, total, cache-hit rate, and estimated cost with parent/subagent attribution and count. Unavailable metrics are labeled “недоступно”; absent subagent data is not displayed as a measured zero. One closing note says the report includes only usage data Pi saved and that could be collected. Subagent aggregates may omit fields, so reported totals can be understated. The structured tool result retains the full usage details. Cost uses only Pi-reported data; it is an estimate, not a provider invoice. The extension makes no network requests and does not publish or edit pull requests.
+- `/cost` for a deterministic visible report. It does not start a model turn.
+- `session_usage_report` when the operator asks about usage or cost. The tool returns the same aggregate as compact text and structured metrics.
 
-Run `npm test` and `npm run typecheck` from the repository root when changing the extension. See the [session usage surface contract](../docs/contracts/surfaces/session-usage-reporting.md) for field semantics, attribution limits, and failure behavior.
+Nothing is reported automatically after a run.
+
+```mermaid
+flowchart LR
+    Branch[Active session branch] --> Collect[Shared collector]
+    Collect --> Group[Parent and subagent groups]
+    Group --> Command[/cost]
+    Group --> Tool[session_usage_report]
+    Command --> Message[Visible report; no model turn]
+    Tool --> Result[Compact text and structured metrics]
+    Message -. Telegram /cost only .-> Chat[Invoking Telegram chat]
+```
+
+Rows group parent or subagent usage by model and effort. They show invocation counts, input (`↑`), output (`↓`), cache read (`R`), cache write (`W`), cache-hit rate (`CH`), and Pi-recorded cost. `—` means unavailable; `~` marks incomplete cost evidence. Tokens use compact `k` notation. Historical rows do not show live context-window occupancy.
+
+## Limits
+
+The extension uses only Pi-recorded data from the active branch; it does not query provider billing or infer prices. Cost is an estimate, not an invoice. Missing or ambiguous child data stays unknown or partial. The extension makes no network requests and does not publish or edit pull requests.
+
+For exact token semantics, attribution rules, and failure behavior, see the [reporting contract](../docs/contracts/surfaces/session-usage-reporting.md). Run `npm test` and `npm run typecheck` after changing this extension.

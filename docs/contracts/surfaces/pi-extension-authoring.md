@@ -28,6 +28,11 @@ The `pi-plugins` package is the canonical distribution path. Its root manifest l
 - Separate transient from permanent failures. Make retries and backoff named, testable, and documented when user-visible. Avoid unhandled rejections and secret-bearing diagnostics.
 - Treat commands, tools, settings, persisted formats, and visible behavior as compatibility surfaces. Document and test behavior changes.
 
+## Language and diagrams
+
+- Write all extension-authored operator/model-facing messages, command and tool descriptions/help, bundled skills, and maintained project documentation in English. Preserve user-provided and configured text verbatim when it is passed through as data; this rule does not set the language of model-generated conversation.
+- Use Mermaid diagrams in project documentation for architecture, lifecycle, or non-trivial data/control flows when they add information beyond adjacent prose. Base diagrams on verified implementation, identify relevant branches, and run `npm run docs:check`; do not add decorative diagrams to every reference page.
+
 ## Security and delivery
 
 Extensions execute with the Pi process's operating-system permissions. Validate untrusted input, constrain authorization at boundaries, document file/network side effects, and persist only state required for recovery.

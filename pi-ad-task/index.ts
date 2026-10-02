@@ -18,10 +18,10 @@ export default function (pi: ExtensionAPI): void {
         const state = getTaskSummary(ctx);
         const recovery = state?.status === "active"
           ? runTaskCommand(pi, "pause", ctx).message
-          : state?.status === "blocked" ? "Ответьте на блокер: /task resume <ответ>."
-            : state?.status === "paused" ? "Возобновить: /task resume, либо остановить: /task stop."
-              : "Проверьте состояние командой /task status.";
-        ctx.ui.notify(`Pi не принял задачу: ${String(error)}\n${recovery}`, "warning");
+          : state?.status === "blocked" ? "Reply to the blocker with /task resume <answer>."
+            : state?.status === "paused" ? "Resume with /task resume or stop with /task stop."
+              : "Check the task state with /task status.";
+        ctx.ui.notify(`Pi could not accept the task: ${String(error)}\n${recovery}`, "warning");
       }
     },
   });

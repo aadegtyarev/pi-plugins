@@ -384,7 +384,7 @@ test("Telegram polling covers busy and successful session-command paths with the
     const relayDeadline = Date.now() + 1000;
     while (!sent.includes("compact usage report") && Date.now() < relayDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(sent.filter((text) => text === "compact usage report").length, 1);
-    assert.ok(sentChats.some((message) => message.chatId === 84 && message.text === "compact usage report"), "usage report follows the latest ordinary Telegram input chat");
+    assert.ok(sentChats.some((message) => message.chatId === 84 && message.text === "compact usage report"), "a manually requested /cost report follows its invoking Telegram chat");
     assert.ok(sent.every((text) => !text.includes("structured details")), "structured report details are never forwarded");
     await events.get("agent_start")?.({}, ctx);
     await events.get("message_end")?.({ message: { ...customReport, content: "TUI-only usage report" } }, ctx);
@@ -593,8 +593,6 @@ test("deferred background summaries retain their distinct Telegram launch routes
     };
     const firstSummary = "Independent reviewer approved the fix.";
     await startSummary("background-success");
-    const firstUsageReport = { role: "custom", customType: "pi-ad-session-usage:report", content: "chat 42 summary usage", display: true, timestamp: Date.now() };
-    await events.get("message_end")?.({ message: firstUsageReport }, ctx);
     await events.get("message_end")?.({ message: { role: "assistant", content: [{ type: "text", text: firstSummary }] } }, ctx);
     holdReply(42, firstSummary);
     parentSettlementActive = true;
@@ -607,25 +605,18 @@ test("deferred background summaries retain their distinct Telegram launch routes
     await firstSummarySettlement;
     parentSettlementActive = false;
     assert.equal(sentChats.filter((message) => message.chatId === 42 && message.text.includes(firstSummary)).length, 1, "the first summary should reach its launch chat");
-    await waitFor(() => sentChats.some((message) => message.chatId === 42 && message.text === "chat 42 summary usage"), "the first summary usage report should retain chat 42 routing");
 
     await startSummary("background-third");
-    const thirdUsageReport = { role: "custom", customType: "pi-ad-session-usage:report", content: "chat 99 summary usage", display: true, timestamp: Date.now() };
-    await events.get("message_end")?.({ message: thirdUsageReport }, ctx);
     const thirdSummary = "Third background summary is ready.";
     await events.get("message_end")?.({ message: { role: "assistant", content: [{ type: "text", text: thirdSummary }] } }, ctx);
     await events.get("agent_settled")?.({}, ctx);
     assert.equal(sentChats.filter((message) => message.chatId === 99 && message.text.includes(thirdSummary)).length, 1, "the nested summary should match its chat 99 nudge despite running before chat 84");
-    await waitFor(() => sentChats.some((message) => message.chatId === 99 && message.text === "chat 99 summary usage"), "the nested summary usage report should retain chat 99 routing");
 
     await startSummary("background-second");
-    const secondUsageReport = { role: "custom", customType: "pi-ad-session-usage:report", content: "chat 84 summary usage", display: true, timestamp: Date.now() };
-    await events.get("message_end")?.({ message: secondUsageReport }, ctx);
     const secondSummary = "Second background summary is ready.";
     await events.get("message_end")?.({ message: { role: "assistant", content: [{ type: "text", text: secondSummary }] } }, ctx);
     await events.get("agent_settled")?.({}, ctx);
     assert.equal(sentChats.filter((message) => message.chatId === 84 && message.text.includes(secondSummary)).length, 1, "chat 84 summary should remain paired after nested chat 99 completion");
-    await waitFor(() => sentChats.some((message) => message.chatId === 84 && message.text === "chat 84 summary usage"), "the second summary usage report should retain chat 84 routing");
 
     completed({ id: "background-failed", agent: "reviewer", state: "failed", success: false });
     await waitFor(() => userMessages.some((text) => text.includes("run ID: background-failed")), "failed summary submission should be observed");
@@ -683,9 +674,9 @@ test("plugin commands are exposed only when available in the Pi session", () => 
   assert.equal(getPluginTelegramCommand("cwd", []), undefined);
   assert.ok(telegramHelpText(commands).includes("/wt_create — Create a worktree"));
   const taskHelp = telegramHelpText([...commands, { name: "task", description: "Task continuation", source: "extension" }]);
-  assert.match(taskHelp, /\/task start <цель>/);
-  assert.match(taskHelp, /\/task resume \[ответ\]/);
-  assert.match(taskHelp, /20 автоматических продолжений/);
+  assert.match(taskHelp, /\/task start <goal>/);
+  assert.match(taskHelp, /\/task resume \[answer\]/);
+  assert.match(taskHelp, /20 automatic continuations/);
 });
 
 test("Telegram task commands provide help, clear start confirmation, and forward task tool results", async () => {
@@ -774,7 +765,7 @@ test("Telegram task commands provide help, clear start confirmation, and forward
     telegramExtension(pi);
     await events.get("session_start")?.({}, ctx);
     const busyDeadline = Date.now() + 2000;
-    while (!sent.some((item) => item.text.includes("Не могу начать или возобновить задачу")) && Date.now() < busyDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    while (!sent.some((item) => item.text.includes("Cannot start or resume the task")) && Date.now() < busyDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.ok(releaseBash, "Bash remains active while the task start is checked");
     releaseBash();
     const bashDeadline = Date.now() + 1000;
@@ -783,12 +774,12 @@ test("Telegram task commands provide help, clear start confirmation, and forward
     releasePostBashUpdates?.();
     const deadline = Date.now() + 3000;
     while ((updateIndex < updates.length || !userMessages.includes("Telegram task goal")) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("/task <цель>") && item.text.includes("/task resume [ответ]")), "bare task command returns full help");
-    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Укажите цель задачи")), "missing start goal gets actionable usage");
-    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Не могу начать или возобновить задачу")), "task start is blocked during another Telegram operation even if Pi reports idle");
-    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("✅ Задача запущена") && item.text.includes("Telegram task goal")), "accepted start is acknowledged with its goal");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("/task <goal>") && item.text.includes("/task resume [answer]")), "bare task command returns full help");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Specify a task goal")), "missing start goal gets actionable usage");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Cannot start or resume the task")), "task start is blocked during another Telegram operation even if Pi reports idle");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("✅ Task started") && item.text.includes("Telegram task goal")), "accepted start is acknowledged with its goal");
     assert.equal(branch.at(-1).data.telegramChatId, 42, "task state retains its Telegram owner for routing across reloads");
-    assert.ok(sent.some((item) => item.chatId === 84 && item.text.includes("другим Telegram-чатом")), "a different authorized chat cannot inspect this task");
+    assert.ok(sent.some((item) => item.chatId === 84 && item.text.includes("another Telegram chat")), "a different authorized chat cannot inspect this task");
     assert.equal(sent.filter((item) => item.chatId === 84).some((item) => item.text.includes("Telegram task goal")), false, "task goals are not leaked to a different chat");
     assert.deepEqual(userMessages, ["Telegram task goal"]);
     assert.ok(emittedTaskRoutes.includes(42), "Telegram publishes current chat route for natural-language task tool ownership");

@@ -12,11 +12,23 @@ export interface UsageTotals {
   costUsd: Metric;
   cacheHitRate: number | null;
 }
+export interface UsageGroup {
+  kind: "parent" | "subagent";
+  agent: string | null;
+  provider: string | null;
+  model: string | null;
+  effort: string | null;
+  calls: number | null;
+  usage: UsageTotals;
+}
 export interface UsageReport {
   estimate: true;
+  sessionDurationMs: number | null;
   parent: UsageTotals;
   subagents: UsageTotals;
   total: UsageTotals;
+  rows: UsageGroup[];
+  totalCalls: number | null;
   subagentCount: number | null;
   complete: boolean;
   unavailable: string[];
@@ -152,13 +164,18 @@ function usageSignature(result: Record<string, unknown>): string {
     ? result.modelAttempts.map((attempt) => {
       if (!attempt || typeof attempt !== "object") return null;
       const attemptUsage = (attempt as { usage?: Record<string, unknown> }).usage;
-      return attemptUsage ? [attemptUsage.input, attemptUsage.output, attemptUsage.cacheRead, attemptUsage.cacheWrite, attemptUsage.cost] : null;
+      const attemptRecord = attempt as Record<string, unknown>;
+      return [attemptRecord.model, attemptRecord.requestedModel, attemptRecord.provider, attemptRecord.thinking ?? attemptRecord.effort, attemptUsage?.input, attemptUsage?.output, attemptUsage?.cacheRead, attemptUsage?.cacheWrite, attemptUsage?.cost];
     })
     : null;
   return JSON.stringify([
     result.sessionFile,
     result.agent,
     result.task,
+    result.provider,
+    result.model,
+    result.requestedModel,
+    result.thinking,
     usage?.input,
     usage?.output,
     usage?.cacheRead,
@@ -199,6 +216,131 @@ function addChildUsage(target: Acc, result: Record<string, unknown>): void {
   markUsageMissing(target);
 }
 
+function compactModelName(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function rowKey(kind: UsageGroup["kind"], agent: string | null, provider: string | null, model: string | null, effort: string | null): string {
+  return JSON.stringify([kind, agent, provider, model, effort]);
+}
+
+type MutableUsageGroup = Omit<UsageGroup, "usage"> & { acc: Acc };
+
+function collectRows(branch: SessionEntry[]): { rows: UsageGroup[]; ambiguousChildIdentity: boolean } {
+  const rows = new Map<string, MutableUsageGroup>();
+  const getRow = (kind: UsageGroup["kind"], agent: string | null, provider: string | null, model: string | null, effort: string | null): MutableUsageGroup => {
+    const key = rowKey(kind, agent, provider, model, effort);
+    let row = rows.get(key);
+    if (!row) {
+      row = { kind, agent, provider, model, effort, calls: 0, acc: create() };
+      rows.set(key, row);
+    }
+    return row;
+  };
+  const seenChildren = new Map<string, { stableIdentity: boolean; signature: string }>();
+  let ambiguousChildIdentity = false;
+
+  for (const entry of branch) {
+    if (entry.type === "message" && entry.message.role === "assistant") {
+      const message = entry.message as typeof entry.message & { model?: unknown; responseModel?: unknown; provider?: unknown; providerThinkingLevel?: unknown };
+      const row = getRow("parent", null, compactModelName(message.provider), compactModelName(message.responseModel) ?? compactModelName(message.model), compactModelName(message.providerThinkingLevel));
+      row.calls++;
+      add(row.acc, message.usage);
+    }
+
+    const results = subagentResults(childDetails(entry));
+    if (!results) continue;
+    for (const item of results) {
+      if (!item || typeof item !== "object") {
+        const row = getRow("subagent", null, null, null, null);
+        row.calls++;
+        markUsageMissing(row.acc);
+        continue;
+      }
+      const result = item as Record<string, unknown>;
+      const signature = usageSignature(result);
+      const sessionFile = typeof result.sessionFile === "string" ? result.sessionFile.trim() : "";
+      const stableIdentity = sessionFile.length > 0;
+      const identity = stableIdentity ? `session:${sessionFile}` : `value:${signature}`;
+      const previous = seenChildren.get(identity);
+      if (previous) {
+        if (!stableIdentity || !previous.stableIdentity || previous.signature !== signature) ambiguousChildIdentity = true;
+        continue;
+      }
+      seenChildren.set(identity, { stableIdentity, signature });
+      const agent = compactModelName(result.agent);
+      const resultModel = compactModelName(result.model ?? result.requestedModel);
+      const resultProvider = compactModelName(result.provider);
+      const resultEffort = compactModelName(result.thinking);
+      const attempts = Array.isArray(result.modelAttempts) ? result.modelAttempts.filter((attempt) => !!attempt && typeof attempt === "object") as Array<Record<string, unknown>> : [];
+      const attemptsWithUsage = attempts.filter((attempt) => !!attempt.usage && typeof attempt.usage === "object");
+      if (attemptsWithUsage.length > 0) {
+        const countedRows = new Set<MutableUsageGroup>();
+        for (const attempt of attemptsWithUsage) {
+          const row = getRow("subagent", agent, compactModelName(attempt.provider) ?? resultProvider, compactModelName(attempt.model) ?? resultModel, compactModelName(attempt.thinking ?? attempt.effort) ?? resultEffort);
+          if (!countedRows.has(row)) {
+            row.calls++;
+            countedRows.add(row);
+          }
+          add(row.acc, attempt.usage, true);
+        }
+        if (attemptsWithUsage.length < attempts.length) {
+          const row = getRow("subagent", agent, null, null, null);
+          row.calls++;
+          markUsageMissing(row.acc);
+        }
+        continue;
+      }
+      const row = getRow("subagent", agent, resultProvider, resultModel, resultEffort);
+      row.calls++;
+      if (result.usage && typeof result.usage === "object") {
+        add(row.acc, result.usage, true);
+      } else if (result.totalCost && typeof result.totalCost === "object") {
+        const totalCost = result.totalCost as { inputTokens?: unknown; outputTokens?: unknown; costUsd?: unknown };
+        add(row.acc, { input: totalCost.inputTokens, output: totalCost.outputTokens, cost: totalCost.costUsd }, true);
+      } else {
+        markUsageMissing(row.acc);
+      }
+    }
+  }
+
+  let sourceRows = [...rows.values()];
+  if (ambiguousChildIdentity) {
+    const childRows = sourceRows.filter((row) => row.kind === "subagent");
+    if (childRows.length > 0) {
+      const unattributed = create();
+      for (const row of childRows) combineInto(unattributed, row.acc);
+      sourceRows = sourceRows.filter((row) => row.kind === "parent");
+      sourceRows.push({ kind: "subagent", agent: null, provider: null, model: null, effort: null, calls: null, acc: unattributed });
+    }
+  }
+  const ordered = sourceRows.sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "parent" ? -1 : 1;
+    return (a.agent ?? "").localeCompare(b.agent ?? "") || (a.provider ?? "").localeCompare(b.provider ?? "") ||
+      (a.model ?? "").localeCompare(b.model ?? "") || (a.effort ?? "").localeCompare(b.effort ?? "");
+  });
+  return { rows: ordered.map(({ acc, ...row }) => ({ ...row, usage: totals(acc) })), ambiguousChildIdentity };
+}
+
+function timestampMs(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function sessionDuration(branch: SessionEntry[], now: number): number | null {
+  for (const entry of branch) {
+    if (entry.type !== "message" || entry.message.role !== "user") continue;
+    const item = entry as unknown as { timestamp?: unknown };
+    const started = timestampMs(item.timestamp) ?? timestampMs((entry.message as unknown as { timestamp?: unknown }).timestamp);
+    if (started !== undefined && now >= started) return now - started;
+  }
+  return null;
+}
+
 function combineInto(target: Acc, source: Acc): void {
   if (!source.seen && source.missing.size === 0) return;
   target.seen ||= source.seen;
@@ -210,7 +352,7 @@ function combineInto(target: Acc, source: Acc): void {
 }
 
 /** Collect active-branch assistant usage and persisted direct-child results. */
-export function collectUsage(branch: SessionEntry[]): UsageReport {
+export function collectUsage(branch: SessionEntry[], now = Date.now()): UsageReport {
   const parent = create();
   const children = create();
   const seenChildren = new Map<string, { stableIdentity: boolean; signature: string }>();
@@ -287,11 +429,22 @@ export function collectUsage(branch: SessionEntry[]): UsageReport {
   const totalReport = totals(combined);
   const unavailableList = [...unavailable].sort();
   const partialList = [...partial].sort();
+  const collectedRows = collectRows(branch);
+  const rows = collectedRows.ambiguousChildIdentity
+    ? collectedRows.rows.map((row) => row.kind === "subagent" ? { ...row, calls: null } : row)
+    : collectedRows.rows;
+  const parentCalls = rows.reduce((sum, row) => sum + (row.kind === "parent" ? row.calls ?? 0 : 0), 0);
+  const totalCalls = !childMetadata || ambiguousDuplicate || collectedRows.ambiguousChildIdentity
+    ? null
+    : parentCalls + childCount;
   return {
     estimate: true,
+    sessionDurationMs: sessionDuration(branch, now),
     parent: parentReport,
     subagents: subagentReport,
     total: totalReport,
+    rows,
+    totalCalls,
     subagentCount: childMetadata && !ambiguousDuplicate ? childCount : null,
     complete: partialList.length === 0 && unavailableList.length === 0,
     unavailable: unavailableList,
