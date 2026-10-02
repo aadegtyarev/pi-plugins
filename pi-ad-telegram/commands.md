@@ -32,7 +32,7 @@ Bash has no interactive TTY; interactive input and password prompts are unsuppor
 
 ## Extension commands
 
-Eligible loaded-extension commands appear too; hyphens become underscores (`/wt-create` becomes `/wt_create`). Internal `telegram*` commands stay hidden. Unknown slash commands are rejected.
+Eligible loaded-extension commands appear too; hyphens become underscores (`/wt-create` becomes `/wt_create`). Internal `telegram*` commands stay hidden. Unknown slash commands are rejected. While Pi is busy, task status/pause/done/stop still work but do not cancel the current operation; task start/resume and other extension commands are rejected rather than queued.
 
 With `pi-ad-task`, use `/task <goal>`, `/task status`, `/task pause`, `/task resume [answer]`, `/task done`, or `/task stop`. Use `/task start <goal>` if the goal begins with a reserved word. Pause does not cancel; `/cancel` does. Only one nonterminal task is allowed. `task_control` requires explicit consent to start.
 

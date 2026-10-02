@@ -11,6 +11,7 @@
 - Exactly one task may be nonterminal on a branch. A new start is refused until the current task is stopped or terminal. Task transitions are validated by the extension.
 - After a completed run, an active task receives one hidden continuation. Failed/aborted runs pause it. At most 20 automatic continuations are allowed. Session load/tree navigation restores state but never starts background work.
 - `/cancel` remains Pi's current-operation cancellation. An aborted active task is paused. `/task stop` closes the task and frees the single-task slot but does not cancel an in-flight Pi operation.
+- `/task status`, `pause`, `done`, and `stop` may be used while a Pi or Telegram operation is in progress. Status is observational; pause/done/stop affect task state and future continuation only. Their feedback must make clear when the current operation continues. In particular, while an operation is busy, `/task stop` must tell the operator to wait before starting another task. Slash-command `/task start` and `/task resume` require an idle session and are rejected rather than queued; `/cancel` is the way to abort current Pi work. A `task_control` tool call made during the current run is not a separate queued slash command and retains its explicit-operator-consent rule.
 
 ## Persistence and compatibility
 

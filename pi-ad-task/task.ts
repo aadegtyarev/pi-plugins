@@ -9,12 +9,12 @@ export const TASK_HELP = [
   "Task commands:",
   "/task <goal> — start a task. Example: /task Fix the bug and run tests. If the goal starts with a reserved command, use /task start <goal>.",
   "/task status — show the task state, goal, and progress.",
-  "/task pause — stop continuation after the current Pi run; it does not cancel that run.",
+  "/task pause — stop future continuation; it does not cancel an operation already in progress.",
   "/task resume [answer] — resume a task; add your answer to a question or blocker after resume.",
-  "/task done — mark the task complete.",
-  "/task stop — close the task and free its slot; this does not cancel an in-flight Pi operation. /cancel stops the current operation and pauses an active task.",
+  "/task done — mark the task complete and stop future continuation; it does not cancel an operation already in progress.",
+  "/task stop — close the task and free its slot; it does not cancel an operation already in progress. Wait for it to finish before starting another task. /cancel aborts current Pi work and pauses an active task.",
+  "Status, pause, done, and stop remain available while Pi is busy; they manage task state, not the current operation. Slash-command start and resume require Pi to be idle.",
   "While a task is active, Pi performs up to 20 automatic continuations. The model records progress with task_update; action=blocked waits for your reply, and done completes the task.",
-  "The pause, done, and stop actions prevent further continuations but do not cancel a model call already in progress.",
   "Blocker reply example: /task resume I approve the proposed scope. Only one task can be active at a time; resume or stop a nonterminal task before starting another.",
 ].join("\n");
 
@@ -93,15 +93,16 @@ function result(message: string, tone: TaskCommandResult["tone"] = "info", promp
 }
 
 /** Shared command implementation for Pi's TUI and the Telegram bridge. */
-export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionContext, options: { telegramChatId?: number } = {}): TaskCommandResult {
+export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionContext, options: { telegramChatId?: number; operationBusy?: boolean } = {}): TaskCommandResult {
   const match = /^([^\s]+)(?:\s+([\s\S]*))?$/.exec(args.trim());
   const action = match?.[1]?.toLowerCase();
   const value = match?.[2]?.trim() ?? "";
   const state = current(ctx);
+  const operationBusy = options.operationBusy ?? !ctx.isIdle();
 
   const managementActions = ["start", "status", "pause", "resume", "done", "stop"];
   if (!action) return result(TASK_HELP);
-  if (action === "status") return result(taskStatus(state));
+  if (action === "status") return result(`${taskStatus(state)}${operationBusy ? "\nCurrent operation is still in progress; task status does not cancel it." : ""}`);
 
   if (action === "start" || !managementActions.includes(action)) {
     const goal = extractGoal(action === "start" ? value : args);
@@ -151,7 +152,7 @@ export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCon
     state.status = "paused";
     persist(pi, state);
     expose(pi, false);
-    return result(`⏸ Automatic continuation paused; the current Pi run is not cancelled. Resume with /task resume.\nGoal: ${state.goal}`);
+    return result(`⏸ Automatic continuation paused.${operationBusy ? " The current operation is still in progress and will not be cancelled." : ""} Resume with /task resume.\nGoal: ${state.goal}`);
   }
   if (action === "done") {
     if (state.status === "done") return result("The task is already complete. Check /task status or start another with /task start <goal>.", "warning");
@@ -159,14 +160,17 @@ export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCon
     state.status = "done";
     persist(pi, state);
     expose(pi, false);
-    return result(`✅ Task marked complete.\nGoal: ${state.goal}`);
+    return result(`✅ Task marked complete.${operationBusy ? " The current operation is still in progress and will not be cancelled." : ""}\nGoal: ${state.goal}`);
   }
   if (action === "stop") {
     if (["done", "stopped"].includes(state.status)) return result(`The task is already ${state.status}; there is nothing to stop. Start another with /task start <goal>.`, "warning");
     state.status = "stopped";
     persist(pi, state);
     expose(pi, false);
-    return result(`⏹ Automatic continuation stopped; the current Pi run is not cancelled. You can now start another task with /task start <goal>.\nPrevious goal: ${state.goal}`);
+    const next = operationBusy
+      ? "The current operation is still in progress and was not cancelled; wait for it to finish before starting another task."
+      : "You can start another task with /task start <goal>.";
+    return result(`⏹ Automatic continuation stopped. ${next}\nPrevious goal: ${state.goal}`);
   }
   return result(TASK_HELP, "warning");
 }

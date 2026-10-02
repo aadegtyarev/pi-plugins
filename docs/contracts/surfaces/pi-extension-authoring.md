@@ -27,6 +27,7 @@ The `pi-plugins` package is the canonical distribution path. Its root manifest l
 - Respect cancellation and session replacement. Make shutdown cleanup idempotent.
 - Separate transient from permanent failures. Make retries and backoff named, testable, and documented when user-visible. Avoid unhandled rejections and secret-bearing diagnostics.
 - Treat commands, tools, settings, persisted formats, and visible behavior as compatibility surfaces. Document and test behavior changes.
+- Every operator-facing slash command in a first-party extension, except Telegram bridge lifecycle controls (`/telegram*`), must be available in the TUI and callable in Telegram when its extension is loaded and the Telegram bridge is enabled. Telegram use is limited to allow-listed users in private chats. Busy-session handling is command-specific: task status and lifecycle controls remain available without cancelling the current operation, task start/resume require an idle Pi session and Telegram bridge, and other generic extension commands are rejected rather than queued. Use unique Telegram-compatible names that do not collide with bot commands and account for Telegram's 100-command menu limit. Telegram-native bot commands and third-party extensions are outside this parity requirement; see [Telegram bridge](pi-ad-telegram.md) for name mapping and runtime constraints.
 
 ## Language and diagrams
 

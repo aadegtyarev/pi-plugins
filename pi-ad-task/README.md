@@ -13,7 +13,7 @@ Manage one operator-approved task on the active Pi session branch. The extension
 /task stop                  Stop and free the task slot
 ```
 
-`/task start <goal>` is an explicit alternative when a goal begins with a reserved command word. `/cancel` aborts the current Pi operation and pauses an active task; `/task stop` does not cancel an in-flight operation.
+`/task start <goal>` is an explicit alternative when a goal begins with a reserved command word. Status, pause, done, and stop remain available while an operation is running; they inspect or change task state but do not cancel that operation. Start and resume require Pi to be idle. `/task stop` asks you to wait for a running operation before starting another task. `/cancel` aborts the current Pi operation and pauses an active task.
 
 The assistant may suggest task mode for substantial work, but must wait for your agreement. `task_control` carries out your explicit start or management request; `task_update` records progress or a blocker. Only one nonterminal task may exist on a branch. Goals and progress are stored in the session transcript and sent to the configured model as ordinary context.
 
