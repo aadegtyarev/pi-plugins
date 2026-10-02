@@ -166,6 +166,7 @@ test("Telegram polling covers busy and successful session-command paths with the
   const sentChats: Array<{ text: string; chatId: number }> = [];
   const edited: string[] = [];
   const userMessages: string[] = [];
+  const taskRouteChats: number[] = [];
   const userMessageOptions: Array<Record<string, unknown> | undefined> = [];
   const reactions: Array<Record<string, unknown>> = [];
   const bashCommands: string[] = [];
@@ -276,7 +277,7 @@ test("Telegram polling covers busy and successful session-command paths with the
     registerCommand() {},
     registerTool() {},
     on(event: string, handler: (...args: any[]) => unknown) { events.set(event, handler); },
-    events: { on() {} },
+    events: { on() {}, emit(name: string, data: { chatId?: number }) { if (name === "pi-ad-telegram:run-chat" && data.chatId) taskRouteChats.push(data.chatId); } },
     getFlag: () => false,
     getThinkingLevel: () => currentEffort,
     getCommands: () => [],
@@ -362,6 +363,7 @@ test("Telegram polling covers busy and successful session-command paths with the
     assert.equal(userMessages[0], "active Telegram task");
     assert.equal(userMessageOptions[0]?.deliverAs, "steer", "idle ordinary text is submitted through Pi steering too");
     assert.equal(userMessages[1], "busy Telegram prompt");
+    assert.ok(taskRouteChats.includes(84), "a steering input updates task-tool ownership to the chat that supplied it");
     assert.equal(userMessages[2], "busy send failure");
     assert.match(userMessages[3] ?? "", /inspect this attachment\n\nUser attached file: .*\.telegram-inbox\/.*notes\.txt\. Inspect it as needed\./);
     assert.deepEqual(userMessages.slice(4), ["/telegram-reload", "/telegram-new"]);
@@ -698,7 +700,7 @@ test("Telegram task commands provide help, clear start confirmation, and forward
   process.env.PI_TELEGRAM_ENABLED = "1";
   process.env.PI_CODING_AGENT_DIR = agentDir;
   const updates = [
-    { text: "/task" }, { text: "/task unknown" }, { text: "/task start" }, { text: "/bash hold" },
+    { text: "/task" }, { text: "/task" }, { text: "/task start" }, { text: "/bash hold" },
     { text: '/task start "busy goal"' }, { text: '/task start "Telegram task goal"' },
     { text: "/task status", chatId: 84, userId: 8 },
   ];
@@ -706,6 +708,7 @@ test("Telegram task commands provide help, clear start confirmation, and forward
   const userMessages: string[] = [];
   const branch: any[] = [];
   const activeTools = new Set<string>();
+  const emittedTaskRoutes: number[] = [];
   const events = new Map<string, (...args: any[]) => unknown>();
   let updateIndex = 0;
   let messageId = 0;
@@ -748,9 +751,9 @@ test("Telegram task commands provide help, clear start confirmation, and forward
   const pi = {
     registerFlag() {}, registerCommand() {}, registerTool() {},
     on(event: string, handler: (...args: any[]) => unknown) { events.set(event, handler); },
-    events: { on() {} },
     getFlag: () => false,
     getThinkingLevel: () => "medium",
+    events: { on() {}, emit(name: string, data: { chatId?: number }) { if (name === "pi-ad-telegram:run-chat" && data.chatId) emittedTaskRoutes.push(data.chatId); } },
     getCommands: () => [{ name: "task", description: "Task continuation", source: "extension" }],
     appendEntry: (customType: string, data: unknown) => branch.push({ type: "custom", customType, data }),
     getActiveTools: () => [...activeTools],
@@ -780,7 +783,7 @@ test("Telegram task commands provide help, clear start confirmation, and forward
     releasePostBashUpdates?.();
     const deadline = Date.now() + 3000;
     while ((updateIndex < updates.length || !userMessages.includes("Telegram task goal")) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("/task start <цель>") && item.text.includes("/task resume [ответ]")), "bare and invalid task commands return full help");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("/task <цель>") && item.text.includes("/task resume [ответ]")), "bare task command returns full help");
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Укажите цель задачи")), "missing start goal gets actionable usage");
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Не могу начать или возобновить задачу")), "task start is blocked during another Telegram operation even if Pi reports idle");
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("✅ Задача запущена") && item.text.includes("Telegram task goal")), "accepted start is acknowledged with its goal");
@@ -788,6 +791,7 @@ test("Telegram task commands provide help, clear start confirmation, and forward
     assert.ok(sent.some((item) => item.chatId === 84 && item.text.includes("другим Telegram-чатом")), "a different authorized chat cannot inspect this task");
     assert.equal(sent.filter((item) => item.chatId === 84).some((item) => item.text.includes("Telegram task goal")), false, "task goals are not leaked to a different chat");
     assert.deepEqual(userMessages, ["Telegram task goal"]);
+    assert.ok(emittedTaskRoutes.includes(42), "Telegram publishes current chat route for natural-language task tool ownership");
 
     const tool = { toolCallId: "task-update-1", toolName: "task_update", args: { action: "progress", note: "Reviewed task contracts" } };
     await events.get("tool_execution_start")?.(tool, ctx);

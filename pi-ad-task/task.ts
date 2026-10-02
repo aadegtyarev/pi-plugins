@@ -1,5 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 
 const ENTRY_TYPE = "pi-ad-hooks-task";
 const MESSAGE_TYPE = "pi-ad-hooks-task-continuation";
@@ -7,15 +7,15 @@ const MAX_CONTINUATIONS = 20;
 
 export const TASK_HELP = [
   "Команды задачи:",
-  "/task start <цель> — начать новую задачу. Пример: /task start \"Исправить баг и проверить тестами\".",
+  "/task <цель> — начать задачу. Пример: /task Исправить баг и запустить тесты. Для цели, начинающейся с команды, используйте /task start <цель>.",
   "/task status — показать состояние, цель и прогресс.",
   "/task pause — не продолжать после текущего запуска Pi; сам запущенный вызов не отменяется.",
   "/task resume [ответ] — продолжить задачу; добавьте ответ на вопрос/блокер после resume.",
   "/task done — отметить задачу выполненной.",
-  "/task stop — отключить продолжение и освободить место для новой задачи; текущий вызов Pi не отменяется (для отмены используйте /cancel в Telegram или остановку в Pi).",
+  "/task stop — завершить задачу и освободить место для новой; текущий вызов Pi не отменяется. /cancel останавливает текущий ход и ставит активную задачу на паузу.",
   "Пока задача active, Pi делает до 20 автоматических продолжений. Модель записывает прогресс через task_update; action=blocked ждёт вашего ответа, done завершает задачу.",
   "Команды pause, done и stop отключают следующие продолжения, но не отменяют уже идущий вызов модели.",
-  "Пример ответа на блокер: /task resume Подтверждаю выбранный scope. Нельзя заменить незавершённую задачу командой start: сначала resume или stop.",
+  "Пример ответа на блокер: /task resume Подтверждаю выбранный scope. Одновременно поддерживается одна задача: незавершённую сначала resume или stop.",
 ].join("\n");
 
 type Status = "active" | "paused" | "done" | "stopped" | "blocked";
@@ -74,7 +74,7 @@ function extractGoal(value: string): string {
 }
 
 function taskStatus(state: TaskState | undefined): string {
-  if (!state) return `Задача не записана в этой ветке сессии.\nЧтобы начать: /task start <цель>\n\n${TASK_HELP}`;
+  if (!state) return `Задача не записана в этой ветке сессии.\nЧтобы начать: /task <цель>\n\n${TASK_HELP}`;
   const progress = state.progress || "прогресс ещё не записан";
   const next = state.status === "blocked" ? "Ответьте на блокер: /task resume <ваш ответ>." :
     state.status === "paused" ? "Продолжить: /task resume." :
@@ -99,13 +99,12 @@ export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCon
   const value = match?.[2]?.trim() ?? "";
   const state = current(ctx);
 
-  if (!action || !["start", "status", "pause", "resume", "done", "stop"].includes(action)) {
-    return result(TASK_HELP, action ? "warning" : "info");
-  }
+  const managementActions = ["start", "status", "pause", "resume", "done", "stop"];
+  if (!action) return result(TASK_HELP);
   if (action === "status") return result(taskStatus(state));
 
-  if (action === "start") {
-    const goal = extractGoal(value);
+  if (action === "start" || !managementActions.includes(action)) {
+    const goal = extractGoal(action === "start" ? value : args);
     if (!goal) return result(`Укажите цель задачи. Пример: /task start "Исправить баг и проверить тестами".\n\n${TASK_HELP}`, "warning");
     if (!ctx.isIdle()) {
       const canReplace = state && !["done", "stopped"].includes(state.status);
@@ -127,9 +126,9 @@ export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCon
   }
 
   if (action === "resume") {
-    if (!state) return result("Нечего возобновлять. Начните задачу командой /task start <цель>.", "warning");
+    if (!state) return result("Нечего возобновлять. Начните задачу командой /task <цель>.", "warning");
     if (!["paused", "blocked"].includes(state.status)) {
-      const next = state.status === "active" ? "Задача уже выполняется; используйте /task status." : `Задача ${state.status} и не возобновляется. Для новой задачи: /task start <цель>.`;
+      const next = state.status === "active" ? "Задача уже выполняется; используйте /task status." : `Задача ${state.status} и не возобновляется. Для новой задачи: /task <цель>.`;
       return result(next, "warning");
     }
     if (!ctx.isIdle()) return result("Нельзя возобновить задачу, пока Pi занят. Проверьте /task status, дождитесь завершения текущего запуска и повторите /task resume [ответ].", "warning");
@@ -174,11 +173,66 @@ export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCon
 
 export function registerTaskContinuation(pi: ExtensionAPI): void {
   // Keep event-only host fakes and older minimal hosts functional; Pi 0.99 exposes both APIs.
-  if (typeof pi.registerTool !== "function" || typeof pi.registerCommand !== "function") return;
+  if (typeof pi.registerTool !== "function") return;
+  let telegramChatId: number | undefined;
+  pi.events?.on("pi-ad-telegram:run-chat", (event) => {
+    const chatId = (event as { chatId?: unknown } | undefined)?.chatId;
+    telegramChatId = Number.isSafeInteger(chatId) && Number(chatId) > 0 ? Number(chatId) : undefined;
+  });
+  pi.on("agent_settled", () => { telegramChatId = undefined; });
+
+  pi.registerTool({
+    name: "task_control",
+    label: "Control task",
+    description: "Carry out the operator's explicit request to start or manage the single bounded task. Never start without explicit operator consent; validate the current task state.",
+    promptSnippet: "Manage one operator-approved bounded task",
+    exposure: "direct",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("start"), Type.Literal("status"), Type.Literal("pause"), Type.Literal("resume"), Type.Literal("done"), Type.Literal("stop")]),
+      goal: Type.Optional(Type.String({ description: "Task goal for start." })),
+      note: Type.Optional(Type.String({ description: "Optional blocker answer or transition note." })),
+    }),
+    async execute(_id, params, _signal, _update, ctx: ExtensionToolContext) {
+      const state = current(ctx);
+      const canReplaceTerminalTask = params.action === "start" && state && ["done", "stopped"].includes(state.status);
+      if (telegramChatId !== undefined && state && state.telegramChatId !== telegramChatId && !canReplaceTerminalTask) {
+        return { content: [{ type: "text", text: "Задачей из этого Telegram-чата управлять нельзя: она создана в Pi или принадлежит другому чату. Используйте исходный чат или управляйте задачей в Pi." }], details: undefined, isError: true };
+      }
+      if (params.action === "status") return { content: [{ type: "text", text: taskStatus(state) }], details: undefined };
+      if (params.action === "start") {
+        const goal = params.goal?.trim();
+        if (!goal) return { content: [{ type: "text", text: "Для старта укажите goal; оператор должен явно попросить запустить задачу." }], details: undefined, isError: true };
+        if (state && !["done", "stopped"].includes(state.status)) return { content: [{ type: "text", text: `Уже есть задача со статусом ${state.status}: ${state.goal}. Сначала продолжите её или остановите командой /task stop.` }], details: undefined, isError: true };
+        const next: TaskState = { version: 1, goal, progress: "", status: "active", continuations: 0, ...(telegramChatId === undefined ? {} : { telegramChatId }) };
+        persist(pi, next);
+        expose(pi, true);
+        return { content: [{ type: "text", text: `Задача запущена: ${goal}. Работайте над этой целью и записывайте этапы через task_update.` }], details: undefined };
+      }
+      if (!state) return { content: [{ type: "text", text: "Активной задачи нет. Для старта дождитесь явной просьбы оператора и вызовите task_control с action=start." }], details: undefined, isError: true };
+      if (params.action === "pause") {
+        if (state.status !== "active") return { content: [{ type: "text", text: `Нельзя поставить на паузу задачу со статусом ${state.status}. Проверьте status или возобновите заблокированную задачу.` }], details: undefined, isError: true };
+        state.status = "paused";
+      } else if (params.action === "resume") {
+        if (!["paused", "blocked"].includes(state.status)) return { content: [{ type: "text", text: `Нельзя возобновить задачу со статусом ${state.status}.` }], details: undefined, isError: true };
+        state.status = "active";
+        if (params.note?.trim()) state.progress = `${state.progress}${state.progress ? "\\n" : ""}Ответ пользователя: ${params.note.trim()}`;
+      } else if (params.action === "done") {
+        if (["done", "stopped"].includes(state.status)) return { content: [{ type: "text", text: `Задача уже ${state.status}.` }], details: undefined, isError: true };
+        state.status = "done";
+      } else if (params.action === "stop") {
+        if (["done", "stopped"].includes(state.status)) return { content: [{ type: "text", text: `Задача уже ${state.status}.` }], details: undefined, isError: true };
+        state.status = "stopped";
+      }
+      persist(pi, state);
+      expose(pi, state.status === "active");
+      return { content: [{ type: "text", text: `Задача ${state.status}: ${state.goal}${params.note ? `\\n${params.note}` : ""}` }], details: undefined };
+    },
+  });
+
   pi.registerTool({
     name: "task_update",
     label: "Update task",
-    description: "Record progress on the current /task, mark it done, or mark it blocked pending user input.",
+    description: "Record progress on the active task, mark it done, or mark it blocked pending user input.",
     promptSnippet: "Update progress on the active task",
     exposure: "direct",
     defaultActive: false,
@@ -206,32 +260,6 @@ export function registerTaskContinuation(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerCommand("task", {
-    description: "Start and control bounded task continuation",
-    async handler(args: string, ctx: ExtensionCommandContext) {
-      const commandResult = runTaskCommand(pi, args, ctx);
-      if (!commandResult.prompt) {
-        ctx.ui.notify(commandResult.message, commandResult.tone);
-        return;
-      }
-      const submissionFailed = (error: unknown): void => {
-        const state = getTaskSummary(ctx);
-        const recovery = state?.status === "active"
-          ? runTaskCommand(pi, "pause", ctx).message
-          : state?.status === "blocked" ? "Ответьте на блокер: /task resume <ответ>."
-            : state?.status === "paused" ? "Возобновить: /task resume, либо остановить: /task stop."
-              : state && ["done", "stopped"].includes(state.status) ? "Задача завершена/остановлена; следующую можно начать через /task start <цель>."
-                : "Проверьте состояние командой /task status; если задачи нет, начните её через /task start <цель>.";
-        ctx.ui.notify(`Pi не принял задачу: ${String(error)}\n${recovery}`, "warning");
-      };
-      try {
-        pi.sendUserMessage(commandResult.prompt);
-        ctx.ui.notify(commandResult.message, commandResult.tone);
-      } catch (error) {
-        submissionFailed(error);
-      }
-    },
-  });
 }
 
 export function restoreTaskTools(pi: ExtensionAPI, ctx: ExtensionContext | undefined): void {

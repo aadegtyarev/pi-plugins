@@ -2,7 +2,7 @@
 
 ## Boundary and ownership
 
-This contract governs the executable Pi extensions in `pi-ad-telegram/`, `pi-ad-session-usage/`, and `pi-ad-hooks/`. Each `index.ts` is the Pi-facing entry point and composition root. This contract covers extension implementation, not the design of Pi skills, prompts, themes, or MCP servers.
+This contract governs the executable Pi extensions in `pi-ad-telegram/`, `pi-ad-session-usage/`, `pi-ad-hooks/`, and `pi-ad-task/`. Each `index.ts` is the Pi-facing entry point and composition root. This contract covers extension implementation, not the design of Pi skills, prompts, themes, or MCP servers.
 
 The `pi-plugins` package is the canonical distribution path. Its root manifest lists extension entry points; extension directories and extension-owned configuration/script paths use the `pi-ad-<name>` convention. See [package distribution](pi-plugin-distribution.md) for installation and legacy-path conflicts.
 
@@ -50,6 +50,7 @@ Run `npm test`, `npm run typecheck`, `npm run docs:check`, and `git diff --check
 
 - [Telegram bridge](pi-ad-telegram.md)
 - [Pi event hooks](pi-event-hooks.md)
+- [Bounded Pi tasks](pi-ad-task.md)
 - [Session usage reporting](session-usage-reporting.md)
 - [Pi plugin package distribution](pi-plugin-distribution.md)
 - [Contract lifecycle](../meta-contract.md)

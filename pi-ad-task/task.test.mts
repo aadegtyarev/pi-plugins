@@ -8,8 +8,9 @@ import path from "node:path";
 function harness() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "pi-ad-hooks-task-"));
   const handlers = new Map<string, (event: any, ctx: any) => any>();
+  const sharedEvents = new Map<string, (event: unknown) => void>();
   let command: ((args: string, ctx: any) => Promise<void>) | undefined;
-  let tool: any;
+  const tools = new Map<string, any>();
   const entries: any[] = [];
   let branch = entries;
   let idle = true;
@@ -19,8 +20,9 @@ function harness() {
   const activeTools = new Set<string>();
   const pi: any = {
     on(name: string, handler: (event: any, ctx: any) => any) { handlers.set(name, handler); },
+    events: { on(name: string, handler: (event: unknown) => void) { sharedEvents.set(name, handler); }, emit(name: string, event: unknown) { sharedEvents.get(name)?.(event); } },
     registerCommand(_name: string, definition: any) { command = definition.handler; },
-    registerTool(definition: any) { tool = definition; },
+    registerTool(definition: any) { tools.set(definition.name, definition); },
     appendEntry(customType: string, data: unknown) { branch.push({ type: "custom", customType, data }); },
     getActiveTools() { return [...activeTools]; },
     setActiveTools(names: string[]) { activeTools.clear(); names.forEach(name => activeTools.add(name)); },
@@ -35,17 +37,15 @@ function harness() {
   process.env.PI_CODING_AGENT_DIR = dir;
   extension(pi);
   if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldDir;
-  return { dir, handlers, command: (args: string, context: any) => command!(args, context), tool: () => tool, entries, notifications, sent, ctx, activeTools, setIdle: (value: boolean) => { idle = value; }, setSendError: (value: unknown) => { sendError = value; }, setBranch: (value: any[]) => { branch = value; } };
+  return { dir, handlers, command: (args: string, context: any) => command!(args, context), tool: (name = "task_update") => tools.get(name), emit: (name: string, value: unknown) => sharedEvents.get(name)?.(value), entries, notifications, sent, ctx, activeTools, setIdle: (value: boolean) => { idle = value; }, setSendError: (value: unknown) => { sendError = value; }, setBranch: (value: any[]) => { branch = value; } };
 }
 
-test("task commands show help, persist state, dispatch goals, and control the task-only tool", async () => {
+test("task commands show help, persist bare or explicit goals, and control the task-only tool", async () => {
   const h = harness();
   try {
     await h.command("", h.ctx);
-    assert.match(h.notifications.at(-1)!, /\/task start <цель>/);
+    assert.match(h.notifications.at(-1)!, /\/task <цель>/);
     assert.match(h.notifications.at(-1)!, /20 автоматических продолжений/);
-    await h.command("unknown", h.ctx);
-    assert.match(h.notifications.at(-1)!, /Команды задачи/);
     await h.command('start "Ship the feature"', h.ctx);
     assert.deepEqual(h.sent, ["Ship the feature"]);
     assert.match(h.notifications.at(-1)!, /Задача запущена/);
@@ -64,7 +64,7 @@ test("task commands show help, persist state, dispatch goals, and control the ta
     assert.equal(h.sent.length, 2);
     await h.command("done", h.ctx);
     assert.equal(h.entries.at(-1).data.status, "done");
-    await h.command("start Replacement", h.ctx);
+    await h.command("Replacement", h.ctx);
     assert.equal(h.entries.at(-1).data.goal, "Replacement");
     await h.command("stop", h.ctx);
     assert.match(h.notifications.at(-1)!, /текущий запуск Pi не отменяется/);
@@ -72,11 +72,51 @@ test("task commands show help, persist state, dispatch goals, and control the ta
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
+test("task control tool starts and manages only operator-requested single task", async () => {
+  const h = harness();
+  try {
+    const control = h.tool("task_control");
+    const started = await control.execute("id", { action: "start", goal: "Explicitly approved goal" }, undefined, undefined, h.ctx);
+    assert.match(started.content[0].text, /Задача запущена/);
+    assert.equal(h.entries.at(-1).data.goal, "Explicitly approved goal");
+    const duplicate = await control.execute("id", { action: "start", goal: "Second task" }, undefined, undefined, h.ctx);
+    assert.equal(duplicate.isError, true);
+    assert.equal(h.entries.at(-1).data.goal, "Explicitly approved goal");
+    await control.execute("id", { action: "pause" }, undefined, undefined, h.ctx);
+    assert.equal(h.entries.at(-1).data.status, "paused");
+    await control.execute("id", { action: "resume", note: "Approved" }, undefined, undefined, h.ctx);
+    assert.equal(h.entries.at(-1).data.status, "active");
+    assert.match(h.entries.at(-1).data.progress, /Approved/);
+    await control.execute("id", { action: "stop" }, undefined, undefined, h.ctx);
+    assert.equal(h.entries.at(-1).data.status, "stopped");
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("natural-language task controls preserve Telegram ownership and reject other chats", async () => {
+  const h = harness();
+  try {
+    h.emit("pi-ad-telegram:run-chat", { chatId: 42 });
+    const control = h.tool("task_control");
+    await control.execute("id", { action: "start", goal: "Telegram-approved goal" }, undefined, undefined, h.ctx);
+    assert.equal(h.entries.at(-1).data.telegramChatId, 42);
+    h.handlers.get("agent_settled")!({}, h.ctx);
+    h.emit("pi-ad-telegram:run-chat", { chatId: 84 });
+    const refused = await control.execute("id", { action: "status" }, undefined, undefined, h.ctx);
+    assert.equal(refused.isError, true);
+    assert.equal(refused.content[0].text.includes("Telegram-approved goal"), false);
+    h.emit("pi-ad-telegram:run-chat", { chatId: 42 });
+    await control.execute("id", { action: "stop" }, undefined, undefined, h.ctx);
+    h.emit("pi-ad-telegram:run-chat", { chatId: 84 });
+    await control.execute("id", { action: "start", goal: "Next Telegram task" }, undefined, undefined, h.ctx);
+    assert.equal(h.entries.at(-1).data.telegramChatId, 84, "a new chat may start after the former owner's task is terminal");
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
 test("task command errors always point to an actionable recovery", async () => {
   const h = harness();
   try {
     await h.command("resume", h.ctx);
-    assert.match(h.notifications.at(-1)!, /\/task start <цель>/);
+    assert.match(h.notifications.at(-1)!, /\/task <цель>/);
     await h.command("start recovery goal", h.ctx);
     await h.command("pause", h.ctx);
     await h.command("pause", h.ctx);
@@ -186,7 +226,7 @@ test("busy start and resume reject before side effects or unrelated-run continua
   const h = harness();
   try {
     h.setIdle(false);
-    await h.command("start busy goal", h.ctx);
+    await h.command("busy goal", h.ctx);
     assert.match(h.notifications.at(-1)!, /Дождитесь завершения текущего запуска/);
     assert.equal(h.entries.length, 0);
     assert.equal(h.sent.length, 0);

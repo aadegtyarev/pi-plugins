@@ -34,17 +34,18 @@ Long command output is split across messages. `/bash` has no interactive TTY, so
 
 Commands provided by loaded Pi extensions are included when they are eligible for Telegram. Hyphens are mapped to underscores in Telegram names: for example, `/wt-create` appears as `/wt_create`. Pi's internal `telegram*` control commands are not exposed. Unknown slash commands are rejected rather than sent as ordinary prompts.
 
-When `pi-ad-hooks` is loaded, `/help` includes its task commands. `/task` with no subcommand, or an unsupported subcommand, returns task help directly:
+When `pi-ad-task` is loaded, `/help` includes its task commands:
 
 | Command | Behavior |
 |---|---|
-| `/task start <goal>` | Start a bounded task. Quote a multi-word goal, e.g. `/task start "Fix the bug and run tests"`. A nonterminal task must be resumed or stopped before another can start. |
+| `/task <goal>` | Start a bounded task directly, for example `/task Fix the bug and run tests`. A nonterminal task must be resumed or stopped before another can start. |
+| `/task start <goal>` | Explicit equivalent, useful when a goal begins with a reserved command word. |
 | `/task status` | Show the goal, progress, state, and continuation count. |
 | `/task pause` | Pause automatic continuation after the current Pi call; it does not cancel that call. |
-| `/task resume [answer]` | Resume a paused/blocked task; optional answer is added to the continuation context to respond to a blocker. |
+| `/task resume [answer]` | Resume a paused/blocked task; optional answer is added to the continuation context. |
 | `/task done` | Mark the current task complete. |
-| `/task stop` | Stop future automatic continuation so a new task can start. The current Pi call is not cancelled; use `/cancel` for that. |
+| `/task stop` | Close the task and free its slot. The current Pi call is not cancelled; `/cancel` cancels the current Pi operation and pauses an interrupted task. |
 
-Accepted starts and resumes are acknowledged in Telegram. Task tool updates such as `task_update` are forwarded to the chat that started the active task. Pi rejects invalid transitions with an explanation and recovery command.
+The assistant can carry out clear natural-language task-management requests through `task_control`. It may suggest task mode for substantial scope but waits for operator consent before starting. Accepted starts and resumes are acknowledged in Telegram. Task tool updates such as `task_update` and `task_control` are forwarded only to the chat that owns the active task.
 
 Ordinary text and attachments are submitted to Pi with `deliverAs: "steer"` and best-effort marked 👀; the marker is not confirmation of acceptance or processing. There are no Telegram queue controls. Inputs Pi cannot accept immediately are rejected with a retry explanation, never deferred. See [operations](operations.md) for stale backlog and delivery behavior.
