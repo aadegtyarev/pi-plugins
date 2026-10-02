@@ -2,12 +2,12 @@
 
 ## Boundary and ownership
 
-The `pi-plugins` Git repository is the canonical source for three first-party Pi extensions: `pi-ad-telegram`, `pi-ad-session-usage`, and `pi-ad-hooks`. Its root `package.json` declares their entry points under `pi.extensions`. Pi package management owns installation and resource discovery; this repository owns the extension code and compatibility documentation.
+The `pi-plugins` Git repository is the canonical source for four first-party Pi extensions: `pi-ad-telegram`, `pi-ad-session-usage`, `pi-ad-hooks`, and `pi-ad-task`. Its root `package.json` declares their entry points under `pi.extensions` and the bundled task skill under `pi.skills`. Pi package management owns installation and resource discovery; this repository owns the extension code and compatibility documentation.
 
 ## Installation and observable behavior
 
 - Install the private Git package with `pi install git:github.com/aadegtyarev/pi-plugins`. GitHub authentication must already permit access to the repository.
-- The package exposes exactly the three extension entry points above. Installing it does not configure Telegram credentials or hook preferences.
+- The package exposes exactly the four extension entry points above and bundles the task-workflow skill. Installing it does not configure Telegram credentials or hook preferences.
 - When both Telegram and session-usage extensions are loaded, the Telegram extension observes the public custom-message lifecycle and forwards the `pi-ad-session-usage:report` text once to the chat associated with its Telegram-originated run. Structured details, TUI-only reports, unrelated custom messages, and duplicate assistant responses are not forwarded. This integration does not depend on manifest entry order; transport delivery remains best-effort.
 - The extensions use Pi host APIs. Development dependencies support typechecking and tests; Pi runtime modules are peer dependencies, not bundled copies.
 - Pi records the package at personal scope by default. Updates follow Pi's package manager; this repository does not automatically update a user's installed version.
@@ -32,4 +32,5 @@ Private Git installation can fail when GitHub credentials are missing or invalid
 - [Pi extension authoring](pi-extension-authoring.md)
 - [Telegram bridge](pi-ad-telegram.md)
 - [Event hooks](pi-event-hooks.md)
+- [Bounded Pi tasks](pi-ad-task.md)
 - [Session usage reporting](session-usage-reporting.md)

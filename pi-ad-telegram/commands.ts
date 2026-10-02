@@ -1,5 +1,5 @@
 
-import { TASK_HELP } from "../pi-ad-hooks/task.ts";
+import { TASK_HELP } from "../pi-ad-task/task.ts";
 
 const TELEGRAM_COMMAND_DESCRIPTION_LIMIT = 256;
 const TELEGRAM_COMMAND_MENU_LIMIT = 100;

@@ -8,7 +8,9 @@ import path from "node:path";
 
 test("extension registers precisely every public event once", () => {
   const registered: string[] = [];
-  const api = { on(event: string) { registered.push(event); return () => {}; } };
+  let commands = 0;
+  let tools = 0;
+  const api = { on(event: string) { registered.push(event); return () => {}; }, registerCommand() { commands++; }, registerTool() { tools++; } };
   const oldDir = process.env.PI_CODING_AGENT_DIR;
   const dir = mkdtempSync(path.join(os.tmpdir(), "pi-ad-hooks-host-"));
   try {
@@ -17,6 +19,8 @@ test("extension registers precisely every public event once", () => {
     try { extension(api as never); } finally { console.error = oldError; }
     assert.deepEqual(registered, [...EVENTS]);
     assert.equal(new Set(registered).size, 41);
+    assert.equal(commands, 0, "hooks do not register the task command");
+    assert.equal(tools, 0, "hooks do not register task tools");
   } finally { if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldDir; rmSync(dir, { recursive: true, force: true }); }
 });
 

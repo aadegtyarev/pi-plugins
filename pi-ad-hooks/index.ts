@@ -3,13 +3,11 @@ import path from "node:path";
 import { loadConfig, type HookEvent, type Diagnostic } from "./config.ts";
 import { PromptQueue } from "./prompt-queue.ts";
 import { runScript } from "./script-runner.ts";
-import { continueTask, registerTaskContinuation, restoreTaskTools } from "./task.ts";
 
 export default function (pi: ExtensionAPI): void {
   const agentDir = getAgentDir();
   const config = loadConfig(agentDir, report);
   const prompts = new PromptQueue();
-  registerTaskContinuation(pi);
   const queues = new Map<HookEvent, Promise<void>>();
   let activeRun = false;
   function report(id: string, event: string, code: string, metadata?: Record<string, number | string>): void {
@@ -39,7 +37,7 @@ export default function (pi: ExtensionAPI): void {
   // This is only the public API's required neutral result; hooks never decide project trust.
   pi.on("project_trust", event => { dispatch("project_trust", event); return { trusted: "undecided" }; });
   pi.on("resources_discover", event => dispatch("resources_discover", event));
-  pi.on("session_start", (event, ctx) => { prompts.clear(); activeRun = false; restoreTaskTools(pi, ctx); dispatch("session_start", event); });
+  pi.on("session_start", event => { prompts.clear(); activeRun = false; dispatch("session_start", event); });
   pi.on("session_info_changed", event => dispatch("session_info_changed", event));
   pi.on("session_before_switch", event => { prompts.clear(); activeRun = false; dispatch("session_before_switch", event); });
   pi.on("session_before_fork", event => { prompts.clear(); activeRun = false; dispatch("session_before_fork", event); });
@@ -49,7 +47,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_shutdown", event => { prompts.clear(); activeRun = false; dispatch("session_shutdown", event); });
   pi.on("mcp_servers_change", event => dispatch("mcp_servers_change", event));
   pi.on("session_before_tree", event => { prompts.clear(); activeRun = false; dispatch("session_before_tree", event); });
-  pi.on("session_tree", (event, ctx) => { prompts.clear(); activeRun = false; restoreTaskTools(pi, ctx); dispatch("session_tree", event); });
+  pi.on("session_tree", event => { prompts.clear(); activeRun = false; dispatch("session_tree", event); });
   pi.on("context", event => {
     dispatch("context", event);
     const staged = prompts.consume();
@@ -65,11 +63,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("before_agent_start", event => { activeRun = true; dispatch("before_agent_start", event); });
   pi.on("agent_start", event => dispatch("agent_start", event));
   pi.on("agent_end", event => dispatch("agent_end", event));
-  pi.on("agent_before_settle", (event, ctx) => {
-    dispatch("agent_before_settle", event);
-    const taskResult = continueTask(pi, event, ctx);
-    return taskResult;
-  });
+  pi.on("agent_before_settle", event => dispatch("agent_before_settle", event));
   pi.on("agent_settled", event => { prompts.clear(); activeRun = false; dispatch("agent_settled", event); });
   pi.on("ui_prompt_start", event => dispatch("ui_prompt_start", event));
   pi.on("ui_prompt_end", event => dispatch("ui_prompt_end", event));

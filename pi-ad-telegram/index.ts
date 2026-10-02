@@ -7,7 +7,7 @@ import type { BackgroundWorkEvent } from "./background-adapters/types.ts";
 import { AgentBoardPublisher, BackgroundAgentBatch } from "./agent-board.ts";
 import { TelegramCommandRegistry } from "./command-registry.ts";
 import { getPluginTelegramCommand, getTelegramCommandMenu, normalizeTelegramCommand, telegramHelpText } from "./commands.ts";
-import { getTaskSummary, runTaskCommand } from "../pi-ad-hooks/task.ts";
+import { getTaskSummary, runTaskCommand } from "../pi-ad-task/task.ts";
 import { editTelegramMessage, escapeHtml, sendTelegramMessage } from "./message-renderer.ts";
 import { TelegramOutbox } from "./outbox.ts";
 import { formatTelegramReplyContext } from "./reply-context.ts";
@@ -921,17 +921,18 @@ export default function (pi: ExtensionAPI) {
         const action = args.trim().split(/\s+/, 1)[0]?.toLowerCase();
         const currentTask = getTaskSummary(ctx);
         const isOwnedTask = !!currentTask && currentTask.telegramChatId === chatId;
+        const isStart = !!action && (action === "start" || !["status", "pause", "resume", "done", "stop"].includes(action));
         const needsTaskState = ["status", "pause", "resume", "done", "stop"].includes(action ?? "") ||
-          (action === "start" && !!currentTask && !["done", "stopped"].includes(currentTask.status));
+          (isStart && !!currentTask && !["done", "stopped"].includes(currentTask.status));
         if (currentTask && needsTaskState && !isOwnedTask) {
           await reply(chatId, "В этой сессии уже есть задача, созданная в Pi или связанном с другим Telegram-чатом. Для защиты её данных управляйте ей в Pi или в исходном чате.", signal);
           return;
         }
-        if (["start", "resume"].includes(action ?? "") && isSessionBusy(ctx)) {
-          const recovery = action === "start" && isOwnedTask && currentTask
+        if ((isStart || action === "resume") && isSessionBusy(ctx)) {
+          const recovery = isStart && isOwnedTask && currentTask
             ? ` Текущая задача ${currentTask.status}: ${currentTask.goal}. Чтобы заменить её, используйте /task stop; это не отменит текущий вызов Pi. После его завершения повторите /task start <цель>.${currentTask.status === "blocked" ? " Чтобы продолжить её вместо замены, ответьте: /task resume <ответ>." : ""}`
             : action === "resume" ? " Проверьте /task status, дождитесь завершения текущей операции и повторите /task resume [ответ]."
-              : " Дождитесь завершения текущей операции и повторите /task start <цель>.";
+              : " Дождитесь завершения текущей операции и повторите /task <цель>.";
           await reply(chatId, `Не могу начать или возобновить задачу: Pi или Telegram сейчас занят.${recovery}`, signal);
           return;
         }
@@ -978,6 +979,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (!ctx.isIdle()) {
       try {
+        pi.events?.emit?.("pi-ad-telegram:run-chat", { chatId });
         pi.sendUserMessage(taskText, { expandPromptTemplates: true, deliverAs: "steer" });
       } catch {
         await reply(chatId, "Could not submit this message to Pi. Please try again.", signal);
@@ -1036,6 +1038,7 @@ export default function (pi: ExtensionAPI) {
         await handleSubmissionFailure(new Error("Telegram session ended before submission."));
         return false;
       }
+      pi.events?.emit?.("pi-ad-telegram:run-chat", { chatId });
       pi.sendUserMessage(taskText, { expandPromptTemplates: true, deliverAs: "steer" });
       return true;
     } catch (error) {
@@ -1447,13 +1450,17 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", () => {
-    if (activeBackgroundSummaryRoute) return;
+    if (activeBackgroundSummaryRoute) {
+      pi.events?.emit?.("pi-ad-telegram:run-chat", { chatId: activeBackgroundSummaryRoute.chatId });
+      return;
+    }
     if (pendingSessionUsageReportChatId !== undefined) sessionUsageReportChatId = pendingSessionUsageReportChatId;
     else if (telegramRunChatId === undefined) sessionUsageReportChatId = undefined;
     pendingSessionUsageReportChatId = undefined;
     if (pendingTelegramRunChatId !== undefined) telegramRunChatId = pendingTelegramRunChatId;
     else if (telegramRunChatId === undefined) telegramRunChatId = undefined;
     pendingTelegramRunChatId = undefined;
+    pi.events?.emit?.("pi-ad-telegram:run-chat", { chatId: telegramRunChatId });
   });
 
   pi.on("message_end", (event) => {
