@@ -680,6 +680,132 @@ test("plugin commands are exposed only when available in the Pi session", () => 
   });
   assert.equal(getPluginTelegramCommand("cwd", []), undefined);
   assert.ok(telegramHelpText(commands).includes("/wt_create — Create a worktree"));
+  const taskHelp = telegramHelpText([...commands, { name: "task", description: "Task continuation", source: "extension" }]);
+  assert.match(taskHelp, /\/task start <цель>/);
+  assert.match(taskHelp, /\/task resume \[ответ\]/);
+  assert.match(taskHelp, /20 автоматических продолжений/);
+});
+
+test("Telegram task commands provide help, clear start confirmation, and forward task tool results", async () => {
+  const previousToken = process.env.PI_TELEGRAM_BOT_TOKEN;
+  const previousAllowedIds = process.env.PI_TELEGRAM_ALLOWED_USER_IDS;
+  const previousEnabled = process.env.PI_TELEGRAM_ENABLED;
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousFetch = globalThis.fetch;
+  const agentDir = await mkdtemp(join(tmpdir(), "pi-ad-telegram-task-"));
+  process.env.PI_TELEGRAM_BOT_TOKEN = "test-token";
+  process.env.PI_TELEGRAM_ALLOWED_USER_IDS = "7,8";
+  process.env.PI_TELEGRAM_ENABLED = "1";
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const updates = [
+    { text: "/task" }, { text: "/task unknown" }, { text: "/task start" }, { text: "/bash hold" },
+    { text: '/task start "busy goal"' }, { text: '/task start "Telegram task goal"' },
+    { text: "/task status", chatId: 84, userId: 8 },
+  ];
+  const sent: Array<{ chatId: number; text: string }> = [];
+  const userMessages: string[] = [];
+  const branch: any[] = [];
+  const activeTools = new Set<string>();
+  const events = new Map<string, (...args: any[]) => unknown>();
+  let updateIndex = 0;
+  let messageId = 0;
+  let releaseBash: (() => void) | undefined;
+  let allowPostBashUpdates = false;
+  let releasePostBashUpdates: (() => void) | undefined;
+  const postBashUpdates = new Promise<void>((resolve) => { releasePostBashUpdates = resolve; });
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const method = url.pathname.split("/").at(-1);
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    let result: unknown = true;
+    if (method === "getMe") result = { id: 1, is_bot: true, first_name: "test", username: "test_bot" };
+    else if (method === "getUpdates" && body.timeout === 0) result = [];
+    else if (method === "getUpdates" && updateIndex === 5 && !allowPostBashUpdates) {
+      await postBashUpdates;
+      const update = updates[updateIndex]!;
+      result = [{ update_id: updateIndex + 1, message: { message_id: updateIndex + 1, from: { id: update.userId ?? 7 }, chat: { id: update.chatId ?? 42, type: "private" }, text: update.text } }];
+      updateIndex++;
+    }
+    else if (method === "getUpdates" && updateIndex < updates.length) {
+      const update = updates[updateIndex]!;
+      result = [{ update_id: updateIndex + 1, message: { message_id: updateIndex + 1, from: { id: update.userId ?? 7 }, chat: { id: update.chatId ?? 42, type: "private" }, text: update.text } }];
+      updateIndex++;
+    } else if (method === "getUpdates") {
+      const signal = init?.signal;
+      await new Promise<never>((_resolve, reject) => {
+        if (signal?.aborted) reject(signal.reason);
+        else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    } else if (method === "sendMessage") {
+      sent.push({ chatId: Number(body.chat_id), text: String(body.text) });
+      result = { message_id: ++messageId };
+    } else if (method === "sendChatAction") {
+      const signal = init?.signal;
+      await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+    }
+    return new Response(JSON.stringify({ ok: true, result }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  const pi = {
+    registerFlag() {}, registerCommand() {}, registerTool() {},
+    on(event: string, handler: (...args: any[]) => unknown) { events.set(event, handler); },
+    events: { on() {} },
+    getFlag: () => false,
+    getThinkingLevel: () => "medium",
+    getCommands: () => [{ name: "task", description: "Task continuation", source: "extension" }],
+    appendEntry: (customType: string, data: unknown) => branch.push({ type: "custom", customType, data }),
+    getActiveTools: () => [...activeTools],
+    setActiveTools: (tools: string[]) => { activeTools.clear(); tools.forEach((tool) => activeTools.add(tool)); },
+    exec: async (_command: string, args: string[]) => {
+      if (args.at(-1) === "hold") await new Promise<void>((resolve) => { releaseBash = resolve; });
+      return { code: 0, killed: false, stdout: "", stderr: "" };
+    },
+    sendUserMessage(text: string) { userMessages.push(text); if (text === "Telegram task goal") void events.get("agent_start")?.({}); },
+  } as unknown as ExtensionAPI;
+  const model = { provider: "test-provider", id: "test-model", name: "Test model", reasoning: true };
+  const ctx = {
+    cwd: agentDir, model, modelRegistry: { getAvailable: () => [model] }, isIdle: () => true,
+    getContextUsage: () => undefined,
+    sessionManager: { getBranch: () => branch, getEntries: () => [], getSessionId: () => "task-session", getSessionFile: () => undefined, getSessionName: () => undefined },
+  } as unknown as ExtensionContext;
+  try {
+    telegramExtension(pi);
+    await events.get("session_start")?.({}, ctx);
+    const busyDeadline = Date.now() + 2000;
+    while (!sent.some((item) => item.text.includes("Не могу начать или возобновить задачу")) && Date.now() < busyDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(releaseBash, "Bash remains active while the task start is checked");
+    releaseBash();
+    const bashDeadline = Date.now() + 1000;
+    while (!sent.some((item) => item.text.includes("Exit code: 0")) && Date.now() < bashDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    allowPostBashUpdates = true;
+    releasePostBashUpdates?.();
+    const deadline = Date.now() + 3000;
+    while ((updateIndex < updates.length || !userMessages.includes("Telegram task goal")) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("/task start <цель>") && item.text.includes("/task resume [ответ]")), "bare and invalid task commands return full help");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Укажите цель задачи")), "missing start goal gets actionable usage");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Не могу начать или возобновить задачу")), "task start is blocked during another Telegram operation even if Pi reports idle");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("✅ Задача запущена") && item.text.includes("Telegram task goal")), "accepted start is acknowledged with its goal");
+    assert.equal(branch.at(-1).data.telegramChatId, 42, "task state retains its Telegram owner for routing across reloads");
+    assert.ok(sent.some((item) => item.chatId === 84 && item.text.includes("другим Telegram-чатом")), "a different authorized chat cannot inspect this task");
+    assert.equal(sent.filter((item) => item.chatId === 84).some((item) => item.text.includes("Telegram task goal")), false, "task goals are not leaked to a different chat");
+    assert.deepEqual(userMessages, ["Telegram task goal"]);
+
+    const tool = { toolCallId: "task-update-1", toolName: "task_update", args: { action: "progress", note: "Reviewed task contracts" } };
+    await events.get("tool_execution_start")?.(tool, ctx);
+    await events.get("tool_execution_end")?.({ ...tool, result: { content: [{ type: "text", text: "Task active: Reviewed task contracts" }] }, isError: false }, ctx);
+    const feedbackDeadline = Date.now() + 1000;
+    while (!sent.some((item) => item.chatId === 42 && item.text.includes("task_update") && item.text.includes("Reviewed task contracts")) && Date.now() < feedbackDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("task_update") && item.text.includes("Reviewed task contracts")), "task tool result is relayed to its Telegram chat");
+    await events.get("tool_execution_end")?.({ ...tool, toolName: "read", result: { content: [{ type: "text", text: "ordinary tool output" }] }, isError: false }, ctx);
+    assert.equal(sent.some((item) => item.text.includes("ordinary tool output")), false, "ordinary tools are not separately forwarded");
+  } finally {
+    await events.get("session_shutdown")?.();
+    globalThis.fetch = previousFetch;
+    if (previousToken === undefined) delete process.env.PI_TELEGRAM_BOT_TOKEN; else process.env.PI_TELEGRAM_BOT_TOKEN = previousToken;
+    if (previousAllowedIds === undefined) delete process.env.PI_TELEGRAM_ALLOWED_USER_IDS; else process.env.PI_TELEGRAM_ALLOWED_USER_IDS = previousAllowedIds;
+    if (previousEnabled === undefined) delete process.env.PI_TELEGRAM_ENABLED; else process.env.PI_TELEGRAM_ENABLED = previousEnabled;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(agentDir, { recursive: true, force: true });
+  }
 });
 
 test("command menu, aliases, and help share one definition list", () => {

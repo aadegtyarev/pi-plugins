@@ -1,4 +1,6 @@
 
+import { TASK_HELP } from "../pi-ad-hooks/task.ts";
+
 const TELEGRAM_COMMAND_DESCRIPTION_LIMIT = 256;
 const TELEGRAM_COMMAND_MENU_LIMIT = 100;
 
@@ -79,9 +81,12 @@ export function getPluginTelegramCommand(name: string, commands: readonly PiSess
 }
 
 export function telegramHelpText(commands: readonly PiSessionCommand[] = []): string {
+  const pluginCommands = getPluginTelegramCommands(commands);
+  const hasTaskCommand = pluginCommands.some((command) => command.command === "task");
   return [
     "I'm connected to a running Pi session. Send text or attachments to pass a task to the agent; messages received while Pi is busy use Pi's steering queue. Inputs that Pi cannot accept are rejected rather than deferred. Background agents do not block new input after the parent turn completes.",
     ...TELEGRAM_COMMAND_DEFINITIONS.map((definition) => definition.help),
-    ...getPluginTelegramCommands(commands).map((command) => `/${command.command} — ${command.description}`),
+    ...pluginCommands.filter((command) => command.command !== "task").map((command) => `/${command.command} — ${command.description}`),
+    ...(hasTaskCommand ? [TASK_HELP] : []),
   ].join("\n\n");
 }

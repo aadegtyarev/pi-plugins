@@ -55,9 +55,9 @@ Prompt hooks outside a run are ignored with `PROMPT_ACTION_OUTSIDE_RUN`. Use scr
 
 Task mode is opt-in and is separate from declarative hook configuration:
 
-- `/task start <goal>` persists a task for this session branch and starts its first turn. A nonterminal task must be completed or stopped before another task can replace it; pausing does not permit replacement. Start and resume are rejected while Pi is busy.
-- `/task status` reports the current task and continuation budget. `/task pause` prevents further nudges; `/task resume` starts a new turn; `/task done` and `/task stop` terminate continuation.
-- While active, the `task_update` tool records progress or marks the task `done` or `blocked`. A blocked task waits for the user to resolve it and run `/task resume`.
+- `/task` with no subcommand, or an unsupported subcommand, displays task help. `/task start <goal>` starts a task for this session branch; quote multi-word goals if needed. A nonterminal task must be resumed or stopped before another can start. Start and resume are rejected while Pi is busy.
+- `/task status` reports state, goal, progress, and continuation count. `/task pause` prevents future nudges but does not cancel an in-flight model call. `/task resume [answer]` resumes a paused/blocked task and includes an optional response to the blocker in its next prompt. `/task done` and `/task stop` disable further continuation; they do not cancel an in-flight call.
+- While active, the `task_update` tool records progress or marks the task `done` or `blocked`. A blocked task waits for a user response; use `/task resume <answer>` to provide it or `/task stop` before starting a new task.
 - After a completed agent run, `agent_before_settle` appends a hidden continuation message and requests exactly one next call. It does not recursively invoke the agent from `agent_end`. Aborted or errored runs pause automatically.
 - The extension stores versioned task state in custom session entries and restores it from the active branch after reload/resume/tree navigation. Session reload does not start background work.
 - At most 20 automatic continuations are allowed per task. Reaching the cap pauses the task and notifies the user. This fixed bound prevents unbounded token use.
@@ -76,7 +76,7 @@ Scripts run asynchronously and do not delay Pi's event handler. Hooks for the sa
 
 ## Security and diagnostics
 
-Scripts run with the user's operating-system permissions and are not sandboxed. Payloads may contain private prompts, paths, or tool arguments. Configure only trusted scripts. Script payloads and process output are not persisted or logged. Task goals/progress are persisted in the local session transcript and sent to the configured model as normal user/continuation context; they are not sent as external notifications or written to diagnostic logs. Diagnostics contain the hook ID, event, stable error code, and limited safe metadata; raw errors, stacks, and script output are omitted.
+Scripts run with the user's operating-system permissions and are not sandboxed. Payloads may contain private prompts, paths, or tool arguments. Configure only trusted scripts. Script payloads and process output are not persisted or logged. Task goals/progress are persisted in the local session transcript and sent to the configured model as normal user/continuation context. Telegram-started tasks also persist the numeric originating private-chat ID only for owner checks and message routing; it is not a credential. These values are not sent as external notifications or written to diagnostic logs. Diagnostics contain the hook ID, event, stable error code, and limited safe metadata; raw errors, stacks, and script output are omitted.
 
 `project_trust` hooks do not grant or deny trust. The extension returns Pi's neutral `{ trusted: "undecided" }` result and runs configured actions separately.
 
