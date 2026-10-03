@@ -465,6 +465,7 @@ test("deferred background summaries retain their distinct Telegram launch routes
   };
   const events = new Map<string, (...args: any[]) => unknown>();
   const lifecycleEvents = new Map<string, (...args: any[]) => unknown>();
+  const sharedEvents = new Map<string, (...args: any[]) => unknown>();
   const availableModel = { provider: "test-provider", id: "test-model", name: "Test model", reasoning: true };
   console.error = (...args) => { errors.push(args.map(String).join(" ")); };
   process.env.PI_TELEGRAM_BOT_TOKEN = "test-token";
@@ -511,7 +512,13 @@ test("deferred background summaries retain their distinct Telegram launch routes
     registerCommand() {},
     registerTool() {},
     on(event: string, handler: (...args: any[]) => unknown) { events.set(event, handler); },
-    events: { on(event: string, handler: (...args: any[]) => unknown) { lifecycleEvents.set(event, handler); } },
+    events: {
+      on(event: string, handler: (...args: any[]) => unknown) {
+        if (event === "pi-ad-task:telegram-route") sharedEvents.set(event, handler);
+        else lifecycleEvents.set(event, handler);
+      },
+      emit(event: string, data: { chatId?: number }) { return sharedEvents.get(event)?.(data); },
+    },
     getFlag: () => false,
     getCommands: () => [],
     sendUserMessage(text: string) {
@@ -626,6 +633,29 @@ test("deferred background summaries retain their distinct Telegram launch routes
     await events.get("message_end")?.({ message: { role: "assistant", content: [{ type: "text", text: unrelatedTuiResponse }] } }, ctx);
     await events.get("agent_settled")?.({}, ctx);
     assert.equal(sentChats.some((message) => message.text.includes(unrelatedTuiResponse)), false, "failed background-summary submission must not leave a route for a later TUI turn");
+
+    const taskRoute = sharedEvents.get("pi-ad-task:telegram-route");
+    assert.ok(taskRoute, "Telegram bridge listens for a persisted task-owner route");
+    taskRoute({ chatId: 42 });
+    taskRoute({ chatId: 42, clear: true });
+    await events.get("agent_start")?.({}, ctx);
+    const rejectedResumeResponse = "Rejected TUI resume must not leave a Telegram route.";
+    await events.get("message_end")?.({ message: { role: "assistant", content: [{ type: "text", text: rejectedResumeResponse }] } }, ctx);
+    await events.get("agent_settled")?.({}, ctx);
+    assert.equal(sentChats.some((message) => message.text.includes(rejectedResumeResponse)), false, "a rejected TUI resume clears its tentative Telegram route");
+
+    taskRoute({ chatId: 42 });
+    await events.get("agent_start")?.({}, ctx);
+    const resumedTaskResponse = "Telegram-owned task completed from the TUI.";
+    await events.get("message_end")?.({ message: { role: "assistant", content: [{ type: "text", text: resumedTaskResponse }] } }, ctx);
+    await events.get("agent_settled")?.({}, ctx);
+    assert.equal(sentChats.filter((message) => message.chatId === 42 && message.text.includes(resumedTaskResponse)).length, 1, "TUI task continuation sends its final answer to the task's Telegram owner");
+
+    await events.get("agent_start")?.({}, ctx);
+    const afterTaskTuiResponse = "Unrelated TUI response after task completion";
+    await events.get("message_end")?.({ message: { role: "assistant", content: [{ type: "text", text: afterTaskTuiResponse }] } }, ctx);
+    await events.get("agent_settled")?.({}, ctx);
+    assert.equal(sentChats.some((message) => message.text.includes(afterTaskTuiResponse)), false, "task-owner routing is cleared before an unrelated later TUI turn");
 
     const nudgeCount = userMessages.filter((text) => text.startsWith("Background agent ")).length;
     started({ id: "tui-background", agent: "reviewer", task: "TUI-only task" });
