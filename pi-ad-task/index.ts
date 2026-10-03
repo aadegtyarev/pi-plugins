@@ -11,10 +11,14 @@ export default function (pi: ExtensionAPI): void {
         ctx.ui.notify(outcome.message, outcome.tone);
         return;
       }
+      const task = getTaskSummary(ctx);
+      const telegramChatId = task?.status === "active" ? task.telegramChatId : undefined;
+      if (telegramChatId !== undefined) pi.events?.emit?.("pi-ad-task:telegram-route", { chatId: telegramChatId });
       try {
         pi.sendUserMessage(outcome.prompt);
         ctx.ui.notify(outcome.message, outcome.tone);
       } catch (error) {
+        if (telegramChatId !== undefined) pi.events?.emit?.("pi-ad-task:telegram-route", { chatId: telegramChatId, clear: true });
         const state = getTaskSummary(ctx);
         const recovery = state?.status === "active"
           ? runTaskCommand(pi, "pause", ctx).message

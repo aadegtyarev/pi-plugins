@@ -39,8 +39,8 @@ Text sends and edits are persisted FIFO to `<agent-dir>/telegram-outbox.json` an
 
 ## Activity and background work
 
-While a Telegram task is active, the bot refreshes its typing action. Only a manually requested `/cost` is forwarded to its invoking chat; TUI-only and unrelated reports are not. Delivery is best-effort.
+While a Telegram task is active, the bot refreshes its typing action. Final assistant responses for a Telegram-owned task are routed to its owner chat through automatic continuations and explicit TUI resumption. Unrelated TUI-only responses are not forwarded. Only a manually requested `/cost` is forwarded to its invoking chat; unrelated usage reports are not. Delivery is best-effort.
 
-The activity bubble shows progress and local time (`Updated: HH:mm`); compaction updates one row. Background agents release Pi's input lock after the parent turn settles. Their edited board shows known model, task preview, status, elapsed time, and tokens—never the full prompt. Running token counts are provisional; unavailable usage is labeled. `/agents` refreshes the board, and completed rows remain in chat.
+The activity bubble shows progress and local time (`Updated: HH:mm`); it is separate from the final response message. Compaction updates one row. Background agents release Pi's input lock after the parent turn settles. Their edited board shows known model, task preview, status, elapsed time, and tokens—never the full prompt. Running token counts are provisional; unavailable usage is labeled. `/agents` refreshes the board, and completed rows remain in chat.
 
 Only the `pi-subagents` adapter supplies provider-specific lifecycle events. Delivery failures do not block Pi.

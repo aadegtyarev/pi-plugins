@@ -4,6 +4,11 @@ import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@eare
 const ENTRY_TYPE = "pi-ad-hooks-task";
 const MESSAGE_TYPE = "pi-ad-hooks-task-continuation";
 const MAX_CONTINUATIONS = 20;
+const TELEGRAM_ROUTE_EVENT = "pi-ad-task:telegram-route";
+
+function routeTaskResponseToTelegram(pi: ExtensionAPI, chatId: number | undefined): void {
+  if (chatId !== undefined) pi.events?.emit?.(TELEGRAM_ROUTE_EVENT, { chatId });
+}
 
 export const TASK_HELP = [
   "Task commands:",
@@ -202,6 +207,7 @@ export function registerTaskContinuation(pi: ExtensionAPI): void {
       if (telegramChatId !== undefined && state && state.telegramChatId !== telegramChatId && !canReplaceTerminalTask) {
         return { content: [{ type: "text", text: "This Telegram chat cannot manage the task because it was created in Pi or belongs to another chat. Use the originating chat or manage the task in Pi." }], details: undefined, isError: true };
       }
+      if (params.action !== "start") routeTaskResponseToTelegram(pi, state?.telegramChatId);
       if (params.action === "status") return { content: [{ type: "text", text: taskStatus(state) }], details: undefined };
       if (params.action === "start") {
         const goal = params.goal?.trim();
@@ -247,6 +253,10 @@ export function registerTaskContinuation(pi: ExtensionAPI): void {
     async execute(_id, params, _signal, _update, ctx: ExtensionToolContext) {
       const state = current(ctx);
       if (!state) return { content: [{ type: "text", text: "There is no active task to update. Start one with /task start <goal>." }], details: undefined, isError: true };
+      if (telegramChatId !== undefined && state.telegramChatId !== telegramChatId) {
+        return { content: [{ type: "text", text: "This Telegram chat cannot update the task because it was created in Pi or belongs to another chat. Use the originating chat or manage the task in Pi." }], details: undefined, isError: true };
+      }
+      routeTaskResponseToTelegram(pi, state.telegramChatId);
       if (state.status !== "active") {
         const recovery = ["paused", "blocked"].includes(state.status)
           ? (state.status === "blocked" ? "Reply to the blocker with /task resume <answer>." : "Resume the task with /task resume.")
@@ -274,6 +284,7 @@ export function restoreTaskTools(pi: ExtensionAPI, ctx: ExtensionContext | undef
 export function continueTask(pi: ExtensionAPI, event: import("@earendil-works/pi-coding-agent").AgentBeforeSettleEvent, ctx: ExtensionContext) {
   const state = current(ctx);
   if (!state || state.status !== "active") return;
+  routeTaskResponseToTelegram(pi, state.telegramChatId);
   if (event.outcome !== "completed") {
     state.status = "paused";
     persist(pi, state); expose(pi, false);

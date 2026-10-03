@@ -19,7 +19,7 @@ Task state is stored in custom session entries and reconstructed from the active
 
 ## Telegram and failure behavior
 
-`pi-ad-telegram` discovers `/task` through public Pi extension-command discovery and routes it to the registered handler. Telegram task tools/commands retain chat ownership protection; a natural-language tool action from Telegram is associated with the originating run chat and cannot inspect or control a task owned by another chat or TUI. Task-specific rejections explain a viable next action. Telegram task status/progress is not disclosed to another authorized chat.
+`pi-ad-telegram` discovers `/task` through public Pi extension-command discovery and routes it to the registered handler. Telegram task tools/commands retain chat ownership protection; a natural-language tool action from Telegram is associated with the originating run chat and cannot inspect or control a task owned by another chat or TUI. For a Telegram-owned task, the persisted owner route is restored for automatic continuations and explicit TUI resumption so the final assistant response reaches the owner chat; it is cleared after the run settles. TUI-only tasks and unrelated TUI runs remain private. Task-specific rejections explain a viable next action. Telegram task status/progress is not disclosed to another authorized chat.
 
 ## Security and non-goals
 

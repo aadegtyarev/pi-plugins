@@ -1450,13 +1450,25 @@ export default function (pi: ExtensionAPI) {
     telegramRunChatId = activeBackgroundSummaryRoute.chatId;
   });
 
+  pi.events?.on?.("pi-ad-task:telegram-route", (event) => {
+    const route = event as { chatId?: unknown; clear?: unknown } | undefined;
+    const chatId = route?.chatId;
+    if (!Number.isSafeInteger(chatId) || Number(chatId) <= 0) return;
+    if (route?.clear === true) {
+      if (telegramRunChatId === Number(chatId)) telegramRunChatId = undefined;
+      return;
+    }
+    telegramRunChatId = Number(chatId);
+  });
+
   pi.on("agent_start", () => {
+    lastAssistantText = "";
     if (activeBackgroundSummaryRoute) {
       pi.events?.emit?.("pi-ad-telegram:run-chat", { chatId: activeBackgroundSummaryRoute.chatId });
       return;
     }
     if (pendingSessionUsageReportChatId !== undefined) sessionUsageReportChatId = pendingSessionUsageReportChatId;
-    else if (telegramRunChatId === undefined) sessionUsageReportChatId = undefined;
+    else sessionUsageReportChatId = undefined;
     pendingSessionUsageReportChatId = undefined;
     if (pendingTelegramRunChatId !== undefined) telegramRunChatId = pendingTelegramRunChatId;
     else if (telegramRunChatId === undefined) telegramRunChatId = undefined;

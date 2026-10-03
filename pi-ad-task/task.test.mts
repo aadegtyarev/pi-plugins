@@ -9,6 +9,7 @@ function harness() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "pi-ad-hooks-task-"));
   const handlers = new Map<string, (event: any, ctx: any) => any>();
   const sharedEvents = new Map<string, (event: unknown) => void>();
+  const emittedEvents: Array<{ name: string; event: unknown }> = [];
   let command: ((args: string, ctx: any) => Promise<void>) | undefined;
   const tools = new Map<string, any>();
   const entries: any[] = [];
@@ -20,7 +21,7 @@ function harness() {
   const activeTools = new Set<string>();
   const pi: any = {
     on(name: string, handler: (event: any, ctx: any) => any) { handlers.set(name, handler); },
-    events: { on(name: string, handler: (event: unknown) => void) { sharedEvents.set(name, handler); }, emit(name: string, event: unknown) { sharedEvents.get(name)?.(event); } },
+    events: { on(name: string, handler: (event: unknown) => void) { sharedEvents.set(name, handler); }, emit(name: string, event: unknown) { emittedEvents.push({ name, event }); sharedEvents.get(name)?.(event); } },
     registerCommand(_name: string, definition: any) { command = definition.handler; },
     registerTool(definition: any) { tools.set(definition.name, definition); },
     appendEntry(customType: string, data: unknown) { branch.push({ type: "custom", customType, data }); },
@@ -37,7 +38,7 @@ function harness() {
   process.env.PI_CODING_AGENT_DIR = dir;
   extension(pi);
   if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldDir;
-  return { dir, handlers, command: (args: string, context: any) => command!(args, context), tool: (name = "task_update") => tools.get(name), emit: (name: string, value: unknown) => sharedEvents.get(name)?.(value), entries, notifications, sent, ctx, activeTools, setIdle: (value: boolean) => { idle = value; }, setSendError: (value: unknown) => { sendError = value; }, setBranch: (value: any[]) => { branch = value; } };
+  return { dir, handlers, command: (args: string, context: any) => command!(args, context), tool: (name = "task_update") => tools.get(name), emit: (name: string, value: unknown) => sharedEvents.get(name)?.(value), emittedEvents, entries, notifications, sent, ctx, activeTools, setIdle: (value: boolean) => { idle = value; }, setSendError: (value: unknown) => { sendError = value; }, setBranch: (value: any[]) => { branch = value; } };
 }
 
 test("task commands show help, persist bare or explicit goals, and control the task-only tool", async () => {
@@ -69,6 +70,31 @@ test("task commands show help, persist bare or explicit goals, and control the t
     await h.command("stop", h.ctx);
     assert.match(h.notifications.at(-1)!, /Automatic continuation stopped/);
     assert.equal(h.entries.at(-1).data.status, "stopped");
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("Telegram-owned task keeps routing through TUI resume and automatic continuation", async () => {
+  const h = harness();
+  try {
+    h.emit("pi-ad-telegram:run-chat", { chatId: 42 });
+    await h.tool("task_control").execute("id", { action: "start", goal: "Telegram-owned goal" }, undefined, undefined, h.ctx);
+    assert.equal(h.entries.at(-1).data.telegramChatId, 42);
+    h.handlers.get("agent_settled")!({}, h.ctx);
+
+    await h.command("pause", h.ctx);
+    await h.command("resume", h.ctx);
+    assert.ok(h.emittedEvents.some(({ name, event }) => name === "pi-ad-task:telegram-route" && (event as { chatId: number }).chatId === 42), "TUI resume restores the persisted Telegram owner route before submitting its prompt");
+
+    h.emittedEvents.length = 0;
+    const continuation = h.handlers.get("agent_before_settle")!({ outcome: "completed", entries: [], context: {} }, h.ctx);
+    assert.equal(continuation.continue, true);
+    assert.ok(h.emittedEvents.some(({ name, event }) => name === "pi-ad-task:telegram-route" && (event as { chatId: number }).chatId === 42), "automatic continuation restores the route from persisted task state");
+
+    await h.command("pause", h.ctx);
+    h.setSendError(new Error("synthetic rejection"));
+    await h.command("resume", h.ctx);
+    assert.equal(h.entries.at(-1).data.status, "paused");
+    assert.ok(h.emittedEvents.some(({ name, event }) => name === "pi-ad-task:telegram-route" && (event as { chatId: number; clear?: boolean }).chatId === 42 && (event as { clear?: boolean }).clear === true), "a rejected TUI resume clears the tentative route");
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
@@ -104,6 +130,11 @@ test("natural-language task controls preserve Telegram ownership and reject othe
     const refused = await control.execute("id", { action: "status" }, undefined, undefined, h.ctx);
     assert.equal(refused.isError, true);
     assert.equal(refused.content[0].text.includes("Telegram-approved goal"), false);
+    const routeCountBeforeUnauthorizedUpdate = h.emittedEvents.filter(({ name }) => name === "pi-ad-task:telegram-route").length;
+    const unauthorizedUpdate = await h.tool("task_update").execute("id", { action: "progress", note: "unauthorized update" }, undefined, undefined, h.ctx);
+    assert.equal(unauthorizedUpdate.isError, true);
+    assert.equal(h.entries.at(-1).data.progress, "");
+    assert.equal(h.emittedEvents.filter(({ name }) => name === "pi-ad-task:telegram-route").length, routeCountBeforeUnauthorizedUpdate, "a non-owner chat cannot retarget the task response");
     h.emit("pi-ad-telegram:run-chat", { chatId: 42 });
     await control.execute("id", { action: "stop" }, undefined, undefined, h.ctx);
     h.emit("pi-ad-telegram:run-chat", { chatId: 84 });
@@ -168,6 +199,7 @@ test("task tool records progress and done/blocked transitions without diagnostic
     await h.command("resume", h.ctx);
     await tool.execute("id", { action: "done", note: "completed" }, undefined, undefined, h.ctx);
     assert.equal(h.entries.at(-1).data.status, "done");
+    assert.equal(h.emittedEvents.some(({ name }) => name === "pi-ad-task:telegram-route"), false, "TUI-only task work must not create a Telegram route");
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 

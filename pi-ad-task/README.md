@@ -17,7 +17,7 @@ Manage one operator-approved task on the active Pi session branch. The extension
 
 The assistant may suggest task mode for substantial work, but must wait for your agreement. `task_control` carries out your explicit start or management request; `task_update` records progress or a blocker. Only one nonterminal task may exist on a branch. Goals and progress are stored in the session transcript and sent to the configured model as ordinary context.
 
-Telegram tasks retain their originating private-chat ID for ownership checks. There are no external notifications or background workers. See the bundled [`task-workflow` skill](skills/task-workflow/SKILL.md) and [task contract](../docs/contracts/surfaces/pi-ad-task.md).
+Telegram tasks retain their originating private-chat ID for ownership checks and final-response routing, including automatic continuations and explicit TUI resumption. Unrelated TUI-only work is not forwarded. There are no external notifications or background workers. See the bundled [`task-workflow` skill](skills/task-workflow/SKILL.md) and [task contract](../docs/contracts/surfaces/pi-ad-task.md).
 
 ```mermaid
 stateDiagram-v2
