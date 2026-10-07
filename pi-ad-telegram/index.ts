@@ -921,8 +921,8 @@ export default function (pi: ExtensionAPI) {
         const action = args.trim().split(/\s+/, 1)[0]?.toLowerCase();
         const currentTask = getTaskSummary(ctx);
         const isOwnedTask = !!currentTask && currentTask.telegramChatId === chatId;
-        const isStart = !!action && (action === "start" || !["status", "pause", "resume", "done", "stop"].includes(action));
-        const needsTaskState = ["status", "pause", "resume", "done", "stop"].includes(action ?? "") ||
+        const isStart = !!action && (action === "start" || !["status", "pause", "resume", "limit", "done", "stop"].includes(action));
+        const needsTaskState = ["status", "pause", "resume", "limit", "done", "stop"].includes(action ?? "") ||
           (isStart && !!currentTask && !["done", "stopped"].includes(currentTask.status));
         if (currentTask && needsTaskState && !isOwnedTask) {
           await reply(chatId, "This session already has a task created in Pi or associated with another Telegram chat. To protect its data, manage it in Pi or in the originating chat.", signal);

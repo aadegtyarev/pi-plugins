@@ -46,7 +46,7 @@ test("task commands show help, persist bare or explicit goals, and control the t
   try {
     await h.command("", h.ctx);
     assert.match(h.notifications.at(-1)!, /\/task <goal>/);
-    assert.match(h.notifications.at(-1)!, /20 automatic continuations/);
+    assert.match(h.notifications.at(-1)!, /default of 40/);
     await h.command('start "Ship the feature"', h.ctx);
     assert.deepEqual(h.sent, ["Ship the feature"]);
     assert.match(h.notifications.at(-1)!, /Task started/);
@@ -108,10 +108,13 @@ test("task control tool starts and manages only operator-requested single task",
     const duplicate = await control.execute("id", { action: "start", goal: "Second task" }, undefined, undefined, h.ctx);
     assert.equal(duplicate.isError, true);
     assert.equal(h.entries.at(-1).data.goal, "Explicitly approved goal");
+    h.handlers.get("agent_before_settle")!({ outcome: "completed", entries: [], context: {} }, h.ctx);
+    assert.equal(h.entries.at(-1).data.continuations, 1);
     await control.execute("id", { action: "pause" }, undefined, undefined, h.ctx);
     assert.equal(h.entries.at(-1).data.status, "paused");
     await control.execute("id", { action: "resume", note: "Approved" }, undefined, undefined, h.ctx);
     assert.equal(h.entries.at(-1).data.status, "active");
+    assert.equal(h.entries.at(-1).data.continuations, 0);
     assert.match(h.entries.at(-1).data.progress, /Approved/);
     await control.execute("id", { action: "stop" }, undefined, undefined, h.ctx);
     assert.equal(h.entries.at(-1).data.status, "stopped");
@@ -225,19 +228,21 @@ test("settle continuation is bounded, persisted, and skipped for terminal or fai
   const h = harness();
   try {
     await h.command("start bounded goal", h.ctx);
+    await h.command("limit 20", h.ctx);
     const settle = h.handlers.get("agent_before_settle")!;
     for (let count = 1; count <= 20; count++) {
       const result = settle({ outcome: "completed", entries: [], context: {} }, h.ctx);
       assert.equal(result.continue, true);
       assert.equal(result.entries[0].customType, "pi-ad-hooks-task-continuation");
       assert.equal(h.entries.at(-1).data.continuations, count);
-      assert.equal(h.entries[count - 1].data.continuations, count - 1);
+      assert.equal(h.entries[count].data.continuations, count - 1);
     }
     const exhausted = settle({ outcome: "completed", entries: [], context: {} }, h.ctx);
     assert.equal(exhausted, undefined);
     assert.equal(h.entries.at(-1).data.status, "paused");
-    assert.match(h.notifications.at(-1)!, /20 automatic continuations/);
+    assert.match(h.notifications.at(-1)!, /limit 20/);
     await h.command("resume", h.ctx);
+    assert.equal(h.entries.at(-1).data.continuations, 0);
     const failed = settle({ outcome: "error", entries: [], context: {} }, h.ctx);
     assert.equal(failed, undefined);
     assert.equal(h.entries.at(-1).data.status, "paused");
@@ -305,7 +310,65 @@ test("busy start and resume reject before side effects or unrelated-run continua
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("restores task state and tool exposure from only the active branch", () => {
+test("per-task continuation limits validate, persist across statuses, and migrate legacy state", async () => {
+  const h = harness();
+  try {
+    await h.command("start configurable goal", h.ctx);
+    assert.equal(h.entries.at(-1).data.continuationLimit, 40);
+    await h.command("limit 3", h.ctx);
+    assert.equal(h.entries.at(-1).data.continuationLimit, 3);
+    await h.command("status", h.ctx);
+    assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 0/3"));
+    await h.command("limit nope", h.ctx);
+    assert.match(h.notifications.at(-1)!, /Invalid continuation limit/);
+    assert.equal(h.entries.at(-1).data.continuationLimit, 3);
+    await h.command("pause", h.ctx);
+    await h.command("limit off", h.ctx);
+    assert.equal(h.entries.at(-1).data.continuationLimit, null);
+    await h.command("resume", h.ctx);
+    assert.equal(h.entries.at(-1).data.continuations, 0);
+    await h.command("limit default", h.ctx);
+    assert.equal(h.entries.at(-1).data.continuationLimit, 40);
+    await h.tool("task_update").execute("id", { action: "blocked", note: "waiting" }, undefined, undefined, h.ctx);
+    await h.command("limit 0", h.ctx);
+    assert.equal(h.entries.at(-1).data.continuationLimit, 0);
+    await h.command("status", h.ctx);
+    assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 0/0"));
+
+    h.setBranch([{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "old state", progress: "", status: "active", continuations: 123456 } }]);
+    await h.command("status", h.ctx);
+    assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 123456/40"));
+    await h.command("limit off", h.ctx);
+    await h.command("status", h.ctx);
+    assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 123456/unlimited"));
+    const unlimited = h.handlers.get("agent_before_settle")!({ outcome: "completed", entries: [], context: {} }, h.ctx);
+    assert.equal(unlimited.continue, true);
+    await h.command("status", h.ctx);
+    assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 123457/unlimited"));
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("continuation limits stop at zero and saturate safely at the counter boundary", async () => {
+  const h = harness();
+  try {
+    h.setBranch([{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "zero limit", progress: "", status: "active", continuations: 0, continuationLimit: 0 } }]);
+    assert.equal(h.handlers.get("agent_before_settle")!({ outcome: "completed", entries: [], context: {} }, h.ctx), undefined);
+    await h.command("status", h.ctx);
+    assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 0/0"));
+    assert.equal(h.entries.length, 0);
+
+    h.setBranch([{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "unlimited boundary", progress: "", status: "active", continuations: Number.MAX_SAFE_INTEGER, continuationLimit: null } }]);
+    const settle = h.handlers.get("agent_before_settle")!;
+    assert.equal(settle({ outcome: "completed", entries: [], context: {} }, h.ctx).continue, true);
+    await h.command("status", h.ctx);
+    assert.ok(h.notifications.at(-1)!.includes(`Automatic continuations: ${Number.MAX_SAFE_INTEGER}/unlimited`));
+    assert.equal(settle({ outcome: "completed", entries: [], context: {} }, h.ctx).continue, true);
+    await h.command("status", h.ctx);
+    assert.ok(h.notifications.at(-1)!.includes(`Automatic continuations: ${Number.MAX_SAFE_INTEGER}/unlimited`));
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("restores task state and tool exposure from only the active branch", async () => {
   const h = harness();
   try {
     h.entries.push({ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "branch goal", progress: "", status: "active", continuations: 2 } });
@@ -319,5 +382,13 @@ test("restores task state and tool exposure from only the active branch", () => 
     h.handlers.get("session_start")!({}, h.ctx);
     assert.equal(h.activeTools.has("task_update"), true);
     assert.equal(h.entries[0].data.goal, "branch goal");
+    h.setBranch([{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "numeric limit", progress: "", status: "active", continuations: 4, continuationLimit: 17 } }]);
+    h.handlers.get("session_tree")!({}, h.ctx);
+    await h.command("status", h.ctx);
+    assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 4/17"));
+    h.setBranch([{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "unlimited", progress: "", status: "active", continuations: 5, continuationLimit: null } }]);
+    h.handlers.get("session_tree")!({}, h.ctx);
+    await h.command("status", h.ctx);
+    assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 5/unlimited"));
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });

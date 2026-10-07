@@ -1,6 +1,6 @@
 # Feature contract: task continuation limits
 
-**Status:** approved
+**Status:** complete/implemented pending final verification
 
 ## Goal
 
