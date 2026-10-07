@@ -718,7 +718,8 @@ test("plugin commands are exposed only when available in the Pi session", () => 
   const taskHelp = telegramHelpText([...commands, { name: "task", description: "Task continuation", source: "extension" }]);
   assert.match(taskHelp, /\/task start <goal>/);
   assert.match(taskHelp, /\/task resume \[answer\]/);
-  assert.match(taskHelp, /20 automatic continuations/);
+  assert.match(taskHelp, /default of 40/);
+  assert.match(taskHelp, /\/task limit <N\|off\|default>/);
 });
 
 test("Telegram task commands provide help, clear start confirmation, and forward task tool results", async () => {
@@ -734,9 +735,10 @@ test("Telegram task commands provide help, clear start confirmation, and forward
   process.env.PI_CODING_AGENT_DIR = agentDir;
   const updates = [
     { text: "/task" }, { text: "/task" }, { text: "/task start" }, { text: "/bash hold" },
-    { text: "/task status" }, { text: "/task pause" }, { text: "/task done" },
+    { text: "/task status" }, { text: "/task limit 5" }, { text: "/task pause" }, { text: "/task done" },
     { text: '/task start "busy goal"' }, { text: '/task start "Telegram task goal"' },
     { text: "/task status", chatId: 84, userId: 8 },
+    { text: "/task limit off", chatId: 84, userId: 8 },
   ];
   const sent: Array<{ chatId: number; text: string }> = [];
   const userMessages: string[] = [];
@@ -758,7 +760,7 @@ test("Telegram task commands provide help, clear start confirmation, and forward
     let result: unknown = true;
     if (method === "getMe") result = { id: 1, is_bot: true, first_name: "test", username: "test_bot" };
     else if (method === "getUpdates" && body.timeout === 0) result = [];
-    else if (method === "getUpdates" && updateIndex === 8 && !allowPostBashUpdates) {
+    else if (method === "getUpdates" && updates[updateIndex]?.text === '/task start "Telegram task goal"' && !allowPostBashUpdates) {
       await postBashUpdates;
       const update = updates[updateIndex]!;
       result = [{ update_id: updateIndex + 1, message: { message_id: updateIndex + 1, from: { id: update.userId ?? 7 }, chat: { id: update.chatId ?? 42, type: "private" }, text: update.text } }];
@@ -825,6 +827,7 @@ test("Telegram task commands provide help, clear start confirmation, and forward
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("/task <goal>") && item.text.includes("/task resume [answer]")), "bare task command returns full help");
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Specify a task goal")), "missing start goal gets actionable usage");
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Task: active") && item.text.includes("Current operation is still in progress")), "task status remains available during a busy operation");
+    assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("continuation limit set to 5")), "the task owner can change its limit while Pi is busy");
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Automatic continuation paused") && item.text.includes("will not be cancelled")), "pause changes task state without cancelling the active operation");
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Task marked complete") && item.text.includes("will not be cancelled")), "done changes task state without cancelling the active operation");
     assert.ok(sent.some((item) => item.chatId === 42 && item.text.includes("Cannot start or resume the task") && item.text.includes("Wait for the current operation to finish") && !item.text.includes("To replace it")), "start is rejected while busy without suggesting a terminal task be stopped");
@@ -832,6 +835,8 @@ test("Telegram task commands provide help, clear start confirmation, and forward
     assert.equal(branch.at(-1).data.telegramChatId, 42, "task state retains its Telegram owner for routing across reloads");
     assert.ok(sent.some((item) => item.chatId === 84 && item.text.includes("another Telegram chat")), "a different authorized chat cannot inspect this task");
     assert.equal(sent.filter((item) => item.chatId === 84).some((item) => item.text.includes("Telegram task goal")), false, "task goals are not leaked to a different chat");
+    assert.ok(sent.some((item) => item.chatId === 84 && item.text.includes("another Telegram chat")), "another chat cannot change the task limit");
+    assert.equal(branch.at(-1).data.continuationLimit, 40, "a denied cross-chat limit change leaves the owner's persisted limit unchanged");
     assert.deepEqual(userMessages, ["Telegram task goal"]);
     assert.ok(emittedTaskRoutes.includes(42), "Telegram publishes current chat route for natural-language task tool ownership");
 
