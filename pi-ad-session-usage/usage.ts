@@ -1,4 +1,5 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { reconcileChildEvidence } from "./child-accounting-reconcile.ts";
 
 export type Metric = { value: number | null; complete: boolean };
 export interface UsageTotals {
@@ -137,61 +138,10 @@ function totals(acc: Acc): UsageTotals {
   };
 }
 
-function childDetails(entry: SessionEntry): unknown {
-  if (entry.type === "custom_message" && entry.customType === "subagent-slash-result") {
-    const details = entry.details;
-    if (details && typeof details === "object" && "result" in details) {
-      return (details as { result?: { details?: unknown } }).result?.details;
-    }
-    return undefined;
-  }
-  if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "subagent") {
-    return entry.message.details;
-  }
-  return undefined;
-}
-
-function subagentResults(details: unknown): unknown[] | undefined {
-  if (!details || typeof details !== "object") return undefined;
-  const record = details as { mode?: unknown; results?: unknown };
-  return typeof record.mode === "string" && Array.isArray(record.results) ? record.results : undefined;
-}
-
-function usageSignature(result: Record<string, unknown>): string {
-  const usage = result.usage as Record<string, unknown> | undefined;
-  const totalCost = result.totalCost as Record<string, unknown> | undefined;
-  const attempts = Array.isArray(result.modelAttempts)
-    ? result.modelAttempts.map((attempt) => {
-      if (!attempt || typeof attempt !== "object") return null;
-      const attemptUsage = (attempt as { usage?: Record<string, unknown> }).usage;
-      const attemptRecord = attempt as Record<string, unknown>;
-      return [attemptRecord.model, attemptRecord.requestedModel, attemptRecord.provider, attemptRecord.thinking ?? attemptRecord.effort, attemptUsage?.input, attemptUsage?.output, attemptUsage?.cacheRead, attemptUsage?.cacheWrite, attemptUsage?.cost];
-    })
-    : null;
-  return JSON.stringify([
-    result.sessionFile,
-    result.agent,
-    result.task,
-    result.provider,
-    result.model,
-    result.requestedModel,
-    result.thinking,
-    usage?.input,
-    usage?.output,
-    usage?.cacheRead,
-    usage?.cacheWrite,
-    usage?.cost,
-    totalCost?.inputTokens,
-    totalCost?.outputTokens,
-    totalCost?.costUsd,
-    attempts,
-  ]);
-}
-
 function addChildUsage(target: Acc, result: Record<string, unknown>): void {
   if (result.usage && typeof result.usage === "object") {
-    // Foreground pi-subagents results aggregate a child's direct model calls here.
-    add(target, result.usage, true);
+    // Legacy child aggregates may zero-fill missing metrics; async envelopes omit unavailable fields.
+    add(target, result.usage, typeof result.accountingIdentity !== "string");
     return;
   }
 
@@ -208,9 +158,9 @@ function addChildUsage(target: Acc, result: Record<string, unknown>): void {
 
   const totalCost = result.totalCost;
   if (totalCost && typeof totalCost === "object") {
-    const summary = totalCost as { inputTokens?: unknown; outputTokens?: unknown; costUsd?: unknown };
-    // Background results retain only input/output totals and cost, not cache categories.
-    add(target, { input: summary.inputTokens, output: summary.outputTokens, cost: summary.costUsd }, true);
+    const summary = totalCost as { inputTokens?: unknown; outputTokens?: unknown; cacheReadTokens?: unknown; cacheWriteTokens?: unknown; costUsd?: unknown };
+    // Legacy background summaries may omit cache totals; absent categories remain unknown.
+    add(target, { input: summary.inputTokens, output: summary.outputTokens, cacheRead: summary.cacheReadTokens, cacheWrite: summary.cacheWriteTokens, cost: summary.costUsd }, typeof result.accountingIdentity !== "string");
     return;
   }
   markUsageMissing(target);
@@ -226,7 +176,7 @@ function rowKey(kind: UsageGroup["kind"], agent: string | null, provider: string
 
 type MutableUsageGroup = Omit<UsageGroup, "usage"> & { acc: Acc };
 
-function collectRows(branch: SessionEntry[]): { rows: UsageGroup[]; ambiguousChildIdentity: boolean } {
+function collectRows(branch: SessionEntry[], childEvidence = reconcileChildEvidence(branch)): { rows: UsageGroup[]; ambiguousChildIdentity: boolean } {
   const rows = new Map<string, MutableUsageGroup>();
   const getRow = (kind: UsageGroup["kind"], agent: string | null, provider: string | null, model: string | null, effort: string | null): MutableUsageGroup => {
     const key = rowKey(kind, agent, provider, model, effort);
@@ -237,8 +187,7 @@ function collectRows(branch: SessionEntry[]): { rows: UsageGroup[]; ambiguousChi
     }
     return row;
   };
-  const seenChildren = new Map<string, { stableIdentity: boolean; signature: string }>();
-  let ambiguousChildIdentity = false;
+  const ambiguousChildIdentity = childEvidence.ambiguous;
 
   for (const entry of branch) {
     if (entry.type === "message" && entry.message.role === "assistant") {
@@ -248,59 +197,44 @@ function collectRows(branch: SessionEntry[]): { rows: UsageGroup[]; ambiguousChi
       add(row.acc, message.usage);
     }
 
-    const results = subagentResults(childDetails(entry));
-    if (!results) continue;
-    for (const item of results) {
-      if (!item || typeof item !== "object") {
-        const row = getRow("subagent", null, null, null, null);
+  }
+  for (const item of childEvidence.records) {
+    if (!item.result) {
+      const row = getRow("subagent", null, null, null, null);
+      row.calls++;
+      markUsageMissing(row.acc);
+      continue;
+    }
+    const result = item.result;
+    const agent = compactModelName(result.agent);
+    const resultModel = compactModelName(result.model ?? result.requestedModel);
+    const resultProvider = compactModelName(result.provider);
+    const resultEffort = compactModelName(result.thinking);
+    const attempts = Array.isArray(result.modelAttempts) ? result.modelAttempts.filter((attempt) => !!attempt && typeof attempt === "object") as Array<Record<string, unknown>> : [];
+    const attemptsWithUsage = attempts.filter((attempt) => !!attempt.usage && typeof attempt.usage === "object");
+    if (item.source === "legacy" && attemptsWithUsage.length > 0) {
+      const countedRows = new Set<MutableUsageGroup>();
+      for (const attempt of attemptsWithUsage) {
+        const row = getRow("subagent", agent, compactModelName(attempt.provider) ?? resultProvider, compactModelName(attempt.model) ?? resultModel, compactModelName(attempt.thinking ?? attempt.effort) ?? resultEffort);
+        if (!countedRows.has(row)) { row.calls++; countedRows.add(row); }
+        add(row.acc, attempt.usage, true);
+      }
+      if (attemptsWithUsage.length < attempts.length) {
+        const row = getRow("subagent", agent, null, null, null);
         row.calls++;
         markUsageMissing(row.acc);
-        continue;
       }
-      const result = item as Record<string, unknown>;
-      const signature = usageSignature(result);
-      const sessionFile = typeof result.sessionFile === "string" ? result.sessionFile.trim() : "";
-      const stableIdentity = sessionFile.length > 0;
-      const identity = stableIdentity ? `session:${sessionFile}` : `value:${signature}`;
-      const previous = seenChildren.get(identity);
-      if (previous) {
-        if (!stableIdentity || !previous.stableIdentity || previous.signature !== signature) ambiguousChildIdentity = true;
-        continue;
-      }
-      seenChildren.set(identity, { stableIdentity, signature });
-      const agent = compactModelName(result.agent);
-      const resultModel = compactModelName(result.model ?? result.requestedModel);
-      const resultProvider = compactModelName(result.provider);
-      const resultEffort = compactModelName(result.thinking);
-      const attempts = Array.isArray(result.modelAttempts) ? result.modelAttempts.filter((attempt) => !!attempt && typeof attempt === "object") as Array<Record<string, unknown>> : [];
-      const attemptsWithUsage = attempts.filter((attempt) => !!attempt.usage && typeof attempt.usage === "object");
-      if (attemptsWithUsage.length > 0) {
-        const countedRows = new Set<MutableUsageGroup>();
-        for (const attempt of attemptsWithUsage) {
-          const row = getRow("subagent", agent, compactModelName(attempt.provider) ?? resultProvider, compactModelName(attempt.model) ?? resultModel, compactModelName(attempt.thinking ?? attempt.effort) ?? resultEffort);
-          if (!countedRows.has(row)) {
-            row.calls++;
-            countedRows.add(row);
-          }
-          add(row.acc, attempt.usage, true);
-        }
-        if (attemptsWithUsage.length < attempts.length) {
-          const row = getRow("subagent", agent, null, null, null);
-          row.calls++;
-          markUsageMissing(row.acc);
-        }
-        continue;
-      }
-      const row = getRow("subagent", agent, resultProvider, resultModel, resultEffort);
-      row.calls++;
-      if (result.usage && typeof result.usage === "object") {
-        add(row.acc, result.usage, true);
-      } else if (result.totalCost && typeof result.totalCost === "object") {
-        const totalCost = result.totalCost as { inputTokens?: unknown; outputTokens?: unknown; costUsd?: unknown };
-        add(row.acc, { input: totalCost.inputTokens, output: totalCost.outputTokens, cost: totalCost.costUsd }, true);
-      } else {
-        markUsageMissing(row.acc);
-      }
+      continue;
+    }
+    const row = getRow("subagent", agent, resultProvider, resultModel, resultEffort);
+    row.calls++;
+    if (result.usage && typeof result.usage === "object") {
+      add(row.acc, result.usage, item.source === "legacy");
+    } else if (result.totalCost && typeof result.totalCost === "object") {
+      const totalCost = result.totalCost as { inputTokens?: unknown; outputTokens?: unknown; cacheReadTokens?: unknown; cacheWriteTokens?: unknown; costUsd?: unknown };
+      add(row.acc, { input: totalCost.inputTokens, output: totalCost.outputTokens, cacheRead: totalCost.cacheReadTokens, cacheWrite: totalCost.cacheWriteTokens, cost: totalCost.costUsd }, item.source === "legacy");
+    } else {
+      markUsageMissing(row.acc);
     }
   }
 
@@ -355,38 +289,21 @@ function combineInto(target: Acc, source: Acc): void {
 export function collectUsage(branch: SessionEntry[], now = Date.now()): UsageReport {
   const parent = create();
   const children = create();
-  const seenChildren = new Map<string, { stableIdentity: boolean; signature: string }>();
+  const childEvidence = reconcileChildEvidence(branch);
   let childCount = 0;
-  let childMetadata = false;
-  let ambiguousDuplicate = false;
+  const childMetadata = childEvidence.recognized;
+  const ambiguousDuplicate = childEvidence.ambiguous;
 
   for (const entry of branch) {
-    if (entry.type === "message" && entry.message.role === "assistant") {
-      add(parent, entry.message.usage);
+    if (entry.type === "message" && entry.message.role === "assistant") add(parent, entry.message.usage);
+  }
+  for (const item of childEvidence.records) {
+    childCount++;
+    if (!item.result) {
+      markUsageMissing(children);
+      continue;
     }
-    const results = subagentResults(childDetails(entry));
-    if (!results) continue;
-    childMetadata = true;
-    for (const item of results) {
-      if (!item || typeof item !== "object") {
-        childCount++;
-        markUsageMissing(children);
-        continue;
-      }
-      const result = item as Record<string, unknown>;
-      const signature = usageSignature(result);
-      const sessionFile = typeof result.sessionFile === "string" ? result.sessionFile.trim() : "";
-      const hasStableIdentity = sessionFile.length > 0;
-      const identity = hasStableIdentity ? `session:${sessionFile}` : `value:${signature}`;
-      const previous = seenChildren.get(identity);
-      if (previous) {
-        if (!hasStableIdentity || !previous.stableIdentity || previous.signature !== signature) ambiguousDuplicate = true;
-        continue;
-      }
-      seenChildren.set(identity, { stableIdentity: hasStableIdentity, signature });
-      childCount++;
-      addChildUsage(children, result);
-    }
+    addChildUsage(children, item.result);
   }
 
   // A recognized, empty subagent result is evidence that this supported source had no children.
@@ -429,7 +346,7 @@ export function collectUsage(branch: SessionEntry[], now = Date.now()): UsageRep
   const totalReport = totals(combined);
   const unavailableList = [...unavailable].sort();
   const partialList = [...partial].sort();
-  const collectedRows = collectRows(branch);
+  const collectedRows = collectRows(branch, childEvidence);
   const rows = collectedRows.ambiguousChildIdentity
     ? collectedRows.rows.map((row) => row.kind === "subagent" ? { ...row, calls: null } : row)
     : collectedRows.rows;
