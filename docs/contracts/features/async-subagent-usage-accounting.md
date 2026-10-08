@@ -1,6 +1,6 @@
 # Feature contract: async subagent usage accounting
 
-- Status: approved
+- Status: complete/implemented; pending final verification
 - Scope: cross-repository contract for `pi-subagents` producer and `pi-ad-session-usage` consumer.
 
 ## Goal
