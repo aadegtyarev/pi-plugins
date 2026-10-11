@@ -307,6 +307,17 @@ test("review rejection counting ignores status views and starts legacy tasks fro
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
+test("review verdict parsing handles batched notices, approve-first wording, and long blank runs quickly", async () => {
+  const { countReviewRejections } = await import("./review-limit.ts");
+  const batched = { type: "custom_message", content: "Background tasks completed (2): **worker**, **reviewer**\n\nworker:\ndone\n\nreviewer:\n## Review\n\nSummary: two issues.\n\n**REQUEST_CHANGES**" };
+  const approveFirst = { type: "custom_message", content: "Background task completed: **reviewer**\n\n## Review\n\n**APPROVE** — no REQUEST_CHANGES needed" };
+  const failed = { type: "custom_message", content: "Background task failed: **reviewer**\n\n## Review\nREQUEST_CHANGES" };
+  const blank = { type: "custom_message", content: `Background task completed: **reviewer**\n## Review\n${"\n".repeat(5000)}x` };
+  const started = performance.now();
+  assert.equal(countReviewRejections([batched, approveFirst, failed, blank]), 1);
+  assert.ok(performance.now() - started < 200);
+});
+
 test("task state controls stay available while busy and distinguish state changes from cancellation", async () => {
   const h = harness();
   try {

@@ -1,8 +1,22 @@
 /** Rejected review rounds allowed per task cycle before automatic continuation stops. */
 export const REVIEW_REJECTION_LIMIT = 2;
 
-const REVIEWER_NOTICE = /^Background task (?:completed|failed): \*\*reviewer\*\*/;
-const REJECTED_VERDICT = /^#{1,3}\s*Review\b[^\n]*(?:\n\s*)*[^\n]*REQUEST_CHANGES/m;
+// Single, batched ("Background tasks completed (2): **worker**, **reviewer**"), and detached completion notices.
+const REVIEWER_NOTICE = /^(?:Background tasks? completed(?: \(\d+\))?|Detached foreground task completed):[^\n]*\*\*reviewer\*\*/;
+const REVIEW_HEADING = /^#{1,3}[ \t]*[^\n]*\breview\b[^\n]*$/gim;
+const VERDICT_WINDOW = 400;
+
+/** Counts review headings whose first verdict token is REQUEST_CHANGES (linear scan, no backtracking). */
+function rejectedVerdicts(text: string): number {
+  let count = 0;
+  for (const heading of text.matchAll(REVIEW_HEADING)) {
+    const window = text.slice(heading.index, heading.index + heading[0].length + VERDICT_WINDOW);
+    const rejected = window.indexOf("REQUEST_CHANGES");
+    const approved = window.indexOf("APPROVE");
+    if (rejected >= 0 && (approved < 0 || rejected < approved)) count++;
+  }
+  return count;
+}
 
 type BranchEntry = {
   type?: string;
@@ -44,7 +58,7 @@ export function countReviewRejections(branch: readonly unknown[]): number {
     } else if (entry.type === "message" && entry.message?.role === "toolResult" && entry.message.toolName === "subagent" && reviewerCalls.has(entry.message.toolCallId ?? "")) {
       text = textOf(entry.message.content);
     }
-    if (text && REJECTED_VERDICT.test(text)) count++;
+    if (text) count += rejectedVerdicts(text);
   }
   return count;
 }
