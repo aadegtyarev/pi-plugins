@@ -259,6 +259,71 @@ test("settle continuation is bounded, persisted, and skipped for terminal or fai
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
+function reviewerNotice(verdict: string) {
+  return { type: "custom_message", customType: "subagent-notify", content: `Background task completed: **reviewer**\n\nreviewer:\n## Review\n\n**${verdict}**\n\n- findings` };
+}
+
+test("task blocks with a report instruction after two rejected review rounds", async () => {
+  const h = harness();
+  try {
+    h.entries.push(reviewerNotice("REQUEST_CHANGES"));
+    await h.command("start reviewed goal", h.ctx);
+    const settle = h.handlers.get("agent_before_settle")!;
+    assert.equal(settle({ outcome: "completed", entries: [], context: {} }, h.ctx).continue, true);
+    h.entries.push(reviewerNotice("REQUEST_CHANGES"));
+    h.entries.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "## Review\n**REQUEST_CHANGES** quoted by the model" }] } });
+    h.entries.push(reviewerNotice("APPROVE"));
+    const once = settle({ outcome: "completed", entries: [], context: {} }, h.ctx);
+    assert.equal(once.entries[0].content.startsWith("Continue the active task"), true);
+    h.entries.push({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "call-r", name: "subagent", arguments: { agent: "reviewer", task: "review" } }] } });
+    h.entries.push({ type: "message", message: { role: "toolResult", toolName: "subagent", toolCallId: "call-r", content: [{ type: "text", text: "## Review — REQUEST_CHANGES\n- P1" }] } });
+    const blocked = settle({ outcome: "completed", entries: [], context: {} }, h.ctx);
+    assert.equal(blocked.continue, true);
+    assert.match(blocked.entries[0].content, /rejected this work 2 times/);
+    assert.match(blocked.entries[0].content, /do not start, resume, or steer workers or reviewers/);
+    assert.equal(h.entries.at(-1).data.status, "blocked");
+    assert.match(h.notifications.at(-1)!, /2 rejected review rounds/);
+    assert.equal(settle({ outcome: "completed", entries: [], context: {} }, h.ctx), undefined);
+    await h.command("resume accept as is", h.ctx);
+    h.entries.push(reviewerNotice("REQUEST_CHANGES"));
+    assert.equal(settle({ outcome: "completed", entries: [], context: {} }, h.ctx).entries[0].content.startsWith("Continue the active task"), true);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("review rejection counting ignores status views and starts legacy tasks from the current branch", async () => {
+  const h = harness();
+  try {
+    h.entries.push(reviewerNotice("REQUEST_CHANGES"), reviewerNotice("REQUEST_CHANGES"));
+    h.entries.push({ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "legacy", progress: "", status: "active", continuations: 0 } });
+    const settle = h.handlers.get("agent_before_settle")!;
+    assert.equal(settle({ outcome: "completed", entries: [], context: {} }, h.ctx).continue, true);
+    assert.equal(h.entries.at(-1).data.reviewRejectionBaseline, 2);
+    h.entries.push({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "call-s", name: "subagent", arguments: { action: "status", id: "run" } }] } });
+    h.entries.push({ type: "message", message: { role: "toolResult", toolName: "subagent", toolCallId: "call-s", content: [{ type: "text", text: "Transcript\n## Review\n**REQUEST_CHANGES**" }] } });
+    h.entries.push(reviewerNotice("REQUEST_CHANGES"));
+    const result = settle({ outcome: "completed", entries: [], context: {} }, h.ctx);
+    assert.equal(result.entries[0].content.startsWith("Continue the active task"), true);
+    assert.equal(h.entries.at(-1).data.status, "active");
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("review verdict parsing handles batched notices, approve-first wording, and long blank runs quickly", async () => {
+  const { countReviewRejections } = await import("./review-limit.ts");
+  const batched = { type: "custom_message", content: "Background tasks completed (2): **worker**, **reviewer**\n\n1. worker\nworker:\ndone\n2. reviewer (r1)\nreviewer:\n## Review\n\nSummary: two issues.\n\n**REQUEST_CHANGES**" };
+  const approveFirst = { type: "custom_message", content: "Background task completed: **reviewer**\n\n## Review\n\n**APPROVE** — no REQUEST_CHANGES needed" };
+  const failed = { type: "custom_message", content: "Background task failed: **reviewer**\n\n## Review\nREQUEST_CHANGES" };
+  const blank = { type: "custom_message", content: `Background task completed: **reviewer**\n## Review\n${"\n".repeat(5000)}x` };
+  const repeatedHeadings = { type: "custom_message", content: "Background task completed: **reviewer**\n\nreviewer:\n## Review\n**REQUEST_CHANGES**\n### Review findings\n- P1: must fix before merge (REQUEST_CHANGES)" };
+  const workerHeading = { type: "custom_message", content: "Background tasks completed (2): **worker**, **reviewer**\n\n1. worker\n## Review feedback addressed\nfixed the REQUEST_CHANGES item\n2. reviewer\n## Review\n**APPROVE**" };
+  const twoReviewers = { type: "custom_message", content: "Background tasks completed (2): **reviewer**, **reviewer**\n\n1. reviewer\n## Review\n**REQUEST_CHANGES**\n2. reviewer\n## Review\n**REQUEST_CHANGES**" };
+  assert.equal(countReviewRejections([repeatedHeadings]), 1);
+  assert.equal(countReviewRejections([workerHeading]), 0);
+  assert.equal(countReviewRejections([twoReviewers]), 2);
+  const started = performance.now();
+  assert.equal(countReviewRejections([batched, approveFirst, failed, blank]), 1);
+  assert.ok(performance.now() - started < 200);
+});
+
 test("task state controls stay available while busy and distinguish state changes from cancellation", async () => {
   const h = harness();
   try {
