@@ -309,10 +309,16 @@ test("review rejection counting ignores status views and starts legacy tasks fro
 
 test("review verdict parsing handles batched notices, approve-first wording, and long blank runs quickly", async () => {
   const { countReviewRejections } = await import("./review-limit.ts");
-  const batched = { type: "custom_message", content: "Background tasks completed (2): **worker**, **reviewer**\n\nworker:\ndone\n\nreviewer:\n## Review\n\nSummary: two issues.\n\n**REQUEST_CHANGES**" };
+  const batched = { type: "custom_message", content: "Background tasks completed (2): **worker**, **reviewer**\n\n1. worker\nworker:\ndone\n2. reviewer (r1)\nreviewer:\n## Review\n\nSummary: two issues.\n\n**REQUEST_CHANGES**" };
   const approveFirst = { type: "custom_message", content: "Background task completed: **reviewer**\n\n## Review\n\n**APPROVE** — no REQUEST_CHANGES needed" };
   const failed = { type: "custom_message", content: "Background task failed: **reviewer**\n\n## Review\nREQUEST_CHANGES" };
   const blank = { type: "custom_message", content: `Background task completed: **reviewer**\n## Review\n${"\n".repeat(5000)}x` };
+  const repeatedHeadings = { type: "custom_message", content: "Background task completed: **reviewer**\n\nreviewer:\n## Review\n**REQUEST_CHANGES**\n### Review findings\n- P1: must fix before merge (REQUEST_CHANGES)" };
+  const workerHeading = { type: "custom_message", content: "Background tasks completed (2): **worker**, **reviewer**\n\n1. worker\n## Review feedback addressed\nfixed the REQUEST_CHANGES item\n2. reviewer\n## Review\n**APPROVE**" };
+  const twoReviewers = { type: "custom_message", content: "Background tasks completed (2): **reviewer**, **reviewer**\n\n1. reviewer\n## Review\n**REQUEST_CHANGES**\n2. reviewer\n## Review\n**REQUEST_CHANGES**" };
+  assert.equal(countReviewRejections([repeatedHeadings]), 1);
+  assert.equal(countReviewRejections([workerHeading]), 0);
+  assert.equal(countReviewRejections([twoReviewers]), 2);
   const started = performance.now();
   assert.equal(countReviewRejections([batched, approveFirst, failed, blank]), 1);
   assert.ok(performance.now() - started < 200);
