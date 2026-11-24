@@ -1,0 +1,14 @@
+# Follows the pi-subagents release cycle: a new release becomes a PR that CI checks
+# (including pi-ad-goal/subagents-compat.test.mts) and auto-merges when green.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: daily
+    allow:
+      - dependency-name: pi-subagents
+    versioning-strategy: increase
+    commit-message:
+      prefix: deps
+    labels: []

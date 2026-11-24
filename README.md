@@ -32,4 +32,6 @@ Run `npm install`, then:
 - `npm run typecheck` — TypeScript check
 - `npm run docs:check` — links and diagrams in the docs
 
+`pi-subagents` updates arrive as Dependabot PRs and merge themselves once CI, including a compatibility test against the new release, passes. After `pi update` brings one in, restart Pi; `/reload` is not enough for pi-subagents.
+
 Contribution rules are in [AGENTS.md](AGENTS.md). Precise behavior guarantees for each extension are in [`docs/contracts/surfaces/`](docs/contracts/surfaces/).
