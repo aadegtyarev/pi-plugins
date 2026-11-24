@@ -2,13 +2,13 @@
 
 ## Boundary and ownership
 
-The `pi-plugins` Git repository is the canonical source for two first-party Pi extensions: `pi-ad-hooks` and `pi-ad-task`. It also ships the third-party `pi-subagents` package, pinned to an exact version in `dependencies`, because `pi-ad-task` relies on its documented API. The root `package.json` declares both first-party entry points plus `./node_modules/pi-subagents/bundle/index.js` under `pi.extensions`, the task skill and `./node_modules/pi-subagents/skills` under `pi.skills`, and `./node_modules/pi-subagents/prompts` under `pi.prompts`. Pi package management owns installation and resource discovery; this repository owns the extension code and compatibility documentation.
+The `pi-plugins` Git repository is the canonical source for two first-party Pi extensions: `pi-ad-hooks` and `pi-ad-goal`. It also ships the third-party `pi-subagents` package, pinned to an exact version in `dependencies`, because `pi-ad-goal` relies on its documented API. The root `package.json` declares both first-party entry points plus `./node_modules/pi-subagents/bundle/index.js` under `pi.extensions`, the goal skill and `./node_modules/pi-subagents/skills` under `pi.skills`, and `./node_modules/pi-subagents/prompts` under `pi.prompts`. Pi package management owns installation and resource discovery; this repository owns the extension code and compatibility documentation.
 
 ## Installation and observable behavior
 
 - Install the public Git package with `pi install git:github.com/aadegtyarev/pi-plugins`. No GitHub credentials are needed to install.
 - The package exposes exactly the three extension entry points above. Pi runs `npm install` for a Git package, which installs the pinned pi-subagents. Installing does not configure hook preferences or pi-subagents settings.
-- Update pi-subagents only together with a check that its RPC `status` reply, completion events, completion-notice formats, and `Full output:` reference still match what `pi-ad-task` parses.
+- Update pi-subagents only together with a check that its RPC `status` reply, completion events, completion-notice formats, and `Full output:` reference still match what `pi-ad-goal` parses.
 - The extensions use Pi host APIs. Development dependencies support typechecking and tests; Pi runtime modules and `typebox` are peer dependencies, not bundled copies.
 - Pi records the package at personal scope by default. Updates follow Pi's package manager; this repository does not automatically update a user's installed version.
 
@@ -31,4 +31,4 @@ Git installation can fail when GitHub or the npm registry is unreachable; Pi rep
 
 - [Pi extension authoring](pi-extension-authoring.md)
 - [Event hooks](pi-event-hooks.md)
-- [Bounded Pi tasks](pi-ad-task.md)
+- [Bounded Pi goals](pi-ad-goal.md)

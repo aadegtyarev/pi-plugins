@@ -55,4 +55,4 @@ Scripts are **not sandboxed**: they run as you and can see prompts, file paths a
 
 - [Reference](reference.md): every supported event, all options, limits, and error messages.
 - [Hooks contract](../docs/contracts/surfaces/pi-event-hooks.md): exact guarantees.
-- Running Pi on a goal until it is done is a separate extension: [`pi-ad-task`](../pi-ad-task/README.md).
+- Running Pi on a goal until it is done is a separate extension: [`pi-ad-goal`](../pi-ad-goal/README.md).

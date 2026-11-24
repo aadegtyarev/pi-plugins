@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
 
-/** Rejected review rounds allowed per task cycle before automatic continuation stops. */
+/** Rejected review rounds allowed per goal cycle before automatic continuation stops. */
 export const REVIEW_REJECTION_LIMIT = 2;
 
 // pi-subagents notify.ts: single, grouped ("Background tasks completed (2): **worker**, **reviewer**"), and detached completion notices.
@@ -15,7 +15,8 @@ const MERGE_VERDICT = /^[ \t>*_-]*Merge verdict[*_]*:[*_\s]*(BLOCK|OK)\b/gim;
 // pi-subagents replaces the tail of outputs longer than 2,000 characters with this reference to the full file.
 const FULL_OUTPUT_REFERENCE = /^Full output: (\/.+?) \([^()\n]*\)\. Read it if needed\.$/m;
 /** Custom session entry recording a verdict that was read from a full-output file. */
-export const REVIEW_VERDICT_ENTRY = "pi-ad-task-review-verdict";
+export const REVIEW_VERDICT_ENTRY = "pi-ad-goal-review-verdict";
+const LEGACY_REVIEW_VERDICT_ENTRY = "pi-ad-task-review-verdict";
 const MAX_FULL_OUTPUT_BYTES = 1024 * 1024;
 
 /** The verdict of one reviewer result, or undefined when the text carries none (linear scan, no backtracking). */
@@ -93,7 +94,7 @@ export function scanReviewVerdicts(branch: readonly unknown[], read: ReadFullOut
   const reviewerCalls = reviewerCallIds(entries);
   const recorded = new Map<string, boolean>();
   for (const entry of entries as ReadonlyArray<BranchEntry & { customType?: string; data?: { path?: unknown; rejected?: unknown } }>) {
-    if (entry.type === "custom" && entry.customType === REVIEW_VERDICT_ENTRY && typeof entry.data?.path === "string" && typeof entry.data.rejected === "boolean")
+    if (entry.type === "custom" && (entry.customType === REVIEW_VERDICT_ENTRY || entry.customType === LEGACY_REVIEW_VERDICT_ENTRY) && typeof entry.data?.path === "string" && typeof entry.data.rejected === "boolean")
       recorded.set(entry.data.path, entry.data.rejected);
   }
   const discovered: ReviewScan["discovered"] = [];
@@ -130,9 +131,9 @@ export function countReviewRejections(branch: readonly unknown[], read: ReadFull
 
 export function reviewLimitReport(rejections: number): string {
   return [
-    `The independent reviewer has rejected this work ${rejections} times (limit ${REVIEW_REJECTION_LIMIT}). Automatic continuation is stopped and the task is blocked.`,
+    `The independent reviewer has rejected this work ${rejections} times (limit ${REVIEW_REJECTION_LIMIT}). Automatic continuation is stopped and the goal is blocked.`,
     "Stop the review/fix loop now: do not start, resume, or steer workers or reviewers, and do not open or merge pull requests.",
     "Reply to the operator with a concise report: the outstanding reviewer findings, what each round fixed, the current branch/commit and check state, any background runs still active, and options (accept as is, keep fixing, or narrow scope).",
-    "The operator continues the task with /task resume <answer>.",
+    "The operator continues the goal with /goal resume <answer>.",
   ].join("\n");
 }

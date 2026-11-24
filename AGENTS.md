@@ -10,8 +10,8 @@
 
 ## Project structure
 
-- `pi-ad-hooks/` and `pi-ad-task/` are the first-party extensions; their entry points are declared in the root Pi package manifest.
-- `pi-subagents` is a pinned third-party dependency whose extension, skills, and prompts are re-exported from `node_modules/` in the root manifest; `pi-ad-task` uses its documented RPC and output formats, so bump it only after rechecking them.
+- `pi-ad-hooks/` and `pi-ad-goal/` are the first-party extensions; their entry points are declared in the root Pi package manifest.
+- `pi-subagents` is a pinned third-party dependency whose extension, skills, and prompts are re-exported from `node_modules/` in the root manifest; `pi-ad-goal` uses its documented RPC and output formats, so bump it only after rechecking them.
 - `.agents/skills/repo-docs/scripts/check_docs.py` is the project-local documentation checker; the reusable `repo-docs` skill is distributed through `ad-pi-addons`.
 - Root `package.json` defines the extension tests, typecheck, and documentation checks.
 
