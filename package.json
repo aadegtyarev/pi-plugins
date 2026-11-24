@@ -3,29 +3,41 @@
   "private": true,
   "type": "module",
   "description": "Pi extension collection",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
     "extensions": [
-      "./pi-ad-telegram/index.ts",
-      "./pi-ad-session-usage/index.ts",
       "./pi-ad-hooks/index.ts",
-      "./pi-ad-task/index.ts"
+      "./pi-ad-task/index.ts",
+      "./node_modules/pi-subagents/bundle/index.js"
     ],
-    "skills": ["./pi-ad-task/skills/*"]
+    "skills": [
+      "./pi-ad-task/skills/*",
+      "./node_modules/pi-subagents/skills"
+    ],
+    "prompts": [
+      "./node_modules/pi-subagents/prompts"
+    ]
   },
   "scripts": {
-    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck pi-ad-telegram/index.ts pi-ad-telegram/config.ts pi-ad-telegram/config.test.mts pi-ad-telegram/typing-indicator.ts pi-ad-telegram/typing-indicator.test.mts pi-ad-telegram/telegram-activity.ts pi-ad-telegram/telegram-activity.test.mts pi-ad-telegram/telegram-format.test.mts pi-ad-telegram/message-renderer.ts pi-ad-telegram/outbox.ts pi-ad-telegram/core.test.mts pi-ad-telegram/outbox.test.mts pi-ad-telegram/background-adapters/*.ts pi-ad-session-usage/index.ts pi-ad-session-usage/usage.ts pi-ad-session-usage/report.ts pi-ad-session-usage/usage.test.mts pi-ad-session-usage/report.test.mts pi-ad-session-usage/index.test.mts pi-ad-hooks/index.ts pi-ad-hooks/config.ts pi-ad-hooks/prompt-queue.ts pi-ad-hooks/script-runner.ts pi-ad-task/index.ts pi-ad-task/task.ts pi-ad-task/review-limit.ts pi-ad-task/task.test.mts pi-ad-hooks/config.test.mts pi-ad-hooks/prompt-queue.test.mts pi-ad-hooks/script-runner.test.mts pi-ad-hooks/index.test.mts",
-    "test": "node --test pi-ad-telegram/core.test.mts pi-ad-telegram/outbox.test.mts pi-ad-telegram/config.test.mts pi-ad-telegram/typing-indicator.test.mts pi-ad-telegram/telegram-activity.test.mts pi-ad-telegram/telegram-format.test.mts pi-ad-session-usage/usage.test.mts pi-ad-session-usage/report.test.mts pi-ad-session-usage/index.test.mts pi-ad-hooks/config.test.mts pi-ad-hooks/prompt-queue.test.mts pi-ad-hooks/script-runner.test.mts pi-ad-task/task.test.mts pi-ad-hooks/index.test.mts package-manifest.test.mjs",
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck pi-ad-hooks/index.ts pi-ad-hooks/config.ts pi-ad-hooks/prompt-queue.ts pi-ad-hooks/script-runner.ts pi-ad-task/index.ts pi-ad-task/task.ts pi-ad-task/review-limit.ts pi-ad-task/subagents.ts pi-ad-task/task.test.mts pi-ad-hooks/config.test.mts pi-ad-hooks/prompt-queue.test.mts pi-ad-hooks/script-runner.test.mts pi-ad-hooks/index.test.mts",
+    "test": "node --test pi-ad-hooks/config.test.mts pi-ad-hooks/prompt-queue.test.mts pi-ad-hooks/script-runner.test.mts pi-ad-task/task.test.mts pi-ad-hooks/index.test.mts package-manifest.test.mjs",
     "docs:check": "python3 .agents/skills/repo-docs/scripts/check_docs.py ."
+  },
+  "dependencies": {
+    "pi-subagents": "0.90.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.99.0",
-    "@earendil-works/pi-coding-agent": "0.99.0",
+    "@earendil-works/pi-ai": "1.6.0",
+    "@earendil-works/pi-coding-agent": "1.6.0",
     "@types/node": "22.19.19",
+    "typebox": "1.3.27",
     "typescript": "5.9.3"
   }
 }

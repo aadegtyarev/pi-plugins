@@ -1,6 +1,8 @@
 # Hooks reference
 
-`pi-ad-hooks` reads `<agent-dir>/pi-ad-hooks.json` when the extension loads. A missing file means no hooks; changes take effect after reload or session restart. The version-1 shape is:
+## The configuration file
+
+The extension reads `<agent-dir>/pi-ad-hooks.json` (usually `~/.pi/agent/pi-ad-hooks.json`) once, when it loads. After editing the file, run `/reload` or restart Pi. If the file does not exist, there are simply no hooks. Project-local hook files are not supported.
 
 ```json
 {
@@ -16,28 +18,54 @@
 }
 ```
 
-IDs are unique across the file and match `[A-Za-z0-9_-]{1,64}`. Hook arrays run in order. Invalid entries, unknown events, or invalid timeouts are skipped with safe diagnostics.
+- `hooks` maps an event name to a list of hooks. Hooks for one event run in the order listed.
+- Every hook needs an `id`: 1–64 characters from letters, digits, `_` and `-`, unique across the whole file.
+- A broken entry (bad ID, unknown event, wrong fields) is skipped and reported; the rest of the file still works.
+
+## The three hook types
 
 ```mermaid
 flowchart TD
-    Config[Configuration] --> Event[Exact public Pi event]
-    Event --> Prompt[Prompt hook]
-    Prompt --> Active{Run active?}
-    Active -->|yes| Stage[Stage once per hook ID]
-    Active -->|no| Skip[Skip with diagnostic]
-    Stage --> Context[Next ordinary context event]
-    Context --> Message[Consume once as hidden custom context]
-    Event --> System[System-prompt hook]
-    System -->|before_agent_start only| Append[Append to Pi system prompt]
-    Event --> Script[Script hook]
-    Script --> Child[Run trusted child asynchronously]
-    Child --> Ignore[Ignore output and status]
-    Settled[Run or session/context ends] --> Clear[Clear pending prompt text]
+    Event[Pi event fires] --> Type{Hook type}
+    Type -->|system_prompt| Append[Text appended to the system prompt of this run]
+    Type -->|prompt| Running{Is Pi working on a request?}
+    Running -->|yes| Next[Text added once, hidden, to the next model request]
+    Running -->|no| Skip[Skipped with a diagnostic]
+    Type -->|script| Script[Script started in the background; output ignored]
 ```
+
+### `system_prompt` — add a standing instruction
+
+```json
+{ "id": "...", "type": "system_prompt", "text": "..." }
+```
+
+Allowed only on `before_agent_start`. The text is appended to Pi's system prompt for that request; Pi's own prompt is kept. Use it for rules that should always apply.
+
+### `prompt` — add a one-time hidden note
+
+```json
+{ "id": "...", "type": "prompt", "text": "..." }
+```
+
+Works only while Pi is handling a request. The text is attached once, as a hidden message, to the very next model call, and is not saved in the session. If the same hook fires several times before that call, the note is added only once. Leftover notes are discarded when the request ends or the session changes. A note cannot start a new request or override system instructions; the model treats it as advice.
+
+### `script` — run your own code
+
+```json
+{ "id": "...", "type": "script", "script": "relative/path.mjs", "timeoutMs": 5000 }
+```
+
+- The script must be a `.mjs` file inside `<agent-dir>/pi-ad-hooks/`. Paths that lead outside that folder, including through symlinks, are rejected.
+- It is started with Node and receives one JSON document on standard input: `{ "version": 1, "event": "<name>", "payload": { ... } }`.
+- Its environment contains only `PATH`, `HOME`, `PI_CODING_AGENT_DIR` and a few variables the OS needs. It has no access to Pi itself.
+- Pi does not wait for it. Scripts for the same event run one after another; scripts for different events may run at the same time.
+- Output and exit code are ignored. After `timeoutMs` (default 5000, allowed 100–30000) the script is killed.
+- Work started at `session_shutdown` may be cut off when Pi exits.
 
 ## Supported events
 
-Only these 41 public event names from Pi 0.99.0 are accepted. Names are literal keys; there are no aliases or automatic support for private/future events.
+These are the 41 public event names of Pi 1.6.0. Names must match exactly.
 
 | Group | Events |
 |---|---|
@@ -50,26 +78,29 @@ Only these 41 public event names from Pi 0.99.0 are accepted. Names are literal 
 | Messages and tools | `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, `tool_call`, `tool_result` |
 | Input and selection | `model_select`, `thinking_level_select`, `user_bash`, `input` |
 
-For payloads and native event timing, see [Pi's extension event reference](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md#events) and [public API declarations](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/extensions/types.ts).
+What each event carries and when it fires is described in [Pi's extension docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md#events).
 
-## Actions
+## Safety and errors
 
-### `system_prompt`
+- Scripts are not sandboxed. They run with your user's permissions and may see prompts, file paths and tool arguments. Configure only code you trust.
+- Nothing a hook does can stop Pi: every failure is skipped. `project_trust` hooks never decide trust; the extension always answers "undecided".
+- Problems are printed to stderr as `[pi-ad-hooks] id=<id> event=<event> code=<CODE>`. Event data, script output and raw errors are never printed.
 
-Shape: `{ "id": "...", "type": "system_prompt", "text": "..." }`; valid only on `before_agent_start`. Appends to `systemPromptOptions.appendSystemPrompt` without replacing Pi's prompt. It adds no user-style message or model turn; use it for standing run instructions.
-
-### `prompt`
-
-Shape: `{ "id": "...", "type": "prompt", "text": "..." }`. Stages advisory text for the next ordinary `context` event in an active run, then consumes it once as a hidden, non-persisted custom message. A `context_with_system` hook waits for the next `context`; repeated firings of one ID coalesce. Text clears at settle or session/context replacement. New idle input clears stale text; steering input preserves it. Outside a run it is skipped with `PROMPT_ACTION_OUTSIDE_RUN`. It cannot start another request, revise a response, or override system/developer instructions.
-
-### `script`
-
-Shape: `{ "id": "...", "type": "script", "script": "relative.mjs", "timeoutMs": 5000 }`. Runs a Node `.mjs` file under `<agent-dir>/pi-ad-hooks/`; resolved paths must stay inside that directory, including through symlinks. The default timeout is 5 seconds; allowed values are 100–30,000 ms.
-
-The child receives one JSON document on stdin: `{ "version": 1, "event": "...", "payload": ... }`. It gets no Pi API/context and only `PATH`, `HOME`, `PI_CODING_AGENT_DIR`, plus platform-required process variables. It runs asynchronously in configuration order for its event; separate events may overlap. Stdout, stderr, exit status, and return values are ignored. A timeout kills the process. Best-effort work, especially at `session_shutdown`, may not finish before Pi exits.
-
-## Trust, failures, and migration
-
-Scripts are not sandboxed: they run with the Pi user's OS permissions and may see prompts, paths, or tool arguments in event data. Configure only trusted code. Script payloads and output are not logged. Failures fail open; diagnostics omit raw errors and stacks. `project_trust` always returns Pi's neutral `{ "trusted": "undecided" }`; hooks never grant or deny trust.
-
-For local installations of the earlier development name `pi-hooks`, first inspect paths and preserve existing files. Move old config/scripts without editing them; remove an old extension symlink only after confirming its target, then link `pi-ad-hooks` to this repository. Do not overwrite regular files or directories. The extension was never released under those old paths.
+| Code | Meaning |
+|---|---|
+| `CONFIG_READ_OR_PARSE_FAILED` | The file exists but cannot be read or is not valid JSON |
+| `CONFIG_SCHEMA_INVALID` | `version` is not `1` or `hooks` is missing |
+| `UNKNOWN_EVENT` | The event name is not in the list above |
+| `HOOK_LIST_INVALID` | The value for an event is not a list |
+| `HOOK_ID_INVALID_OR_DUPLICATE` | Bad or repeated `id` |
+| `HOOK_ENTRY_INVALID` | Wrong or extra fields for the hook type |
+| `SYSTEM_PROMPT_EVENT_INVALID` | `system_prompt` used on an event other than `before_agent_start` |
+| `SYSTEM_PROMPT_OPTIONS_MISSING` | Pi did not provide system-prompt options for this run |
+| `PROMPT_ACTION_OUTSIDE_RUN` | A `prompt` hook fired while Pi was idle |
+| `TIMEOUT_INVALID` | `timeoutMs` is not a whole number between 100 and 30000 |
+| `SCRIPT_PATH_INVALID` | Script missing, not `.mjs`, or outside `<agent-dir>/pi-ad-hooks/` |
+| `SCRIPT_LAUNCH_FAILED` | The script could not be started |
+| `SCRIPT_NONZERO_EXIT` | The script exited with an error code |
+| `SCRIPT_TIMEOUT` | The script was killed after `timeoutMs` |
+| `EVENT_SERIALIZATION_FAILED` | The event data could not be turned into JSON |
+| `SCRIPT_DISPATCH_FAILED` | Unexpected failure while queueing the script |
