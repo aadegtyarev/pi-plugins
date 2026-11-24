@@ -2,7 +2,7 @@
 
 ## Boundary and ownership
 
-This contract governs the executable Pi extensions in `pi-ad-telegram/`, `pi-ad-session-usage/`, `pi-ad-hooks/`, and `pi-ad-task/`. Each `index.ts` is the Pi-facing entry point and composition root. This contract covers extension implementation, not the design of Pi skills, prompts, themes, or MCP servers.
+This contract governs the executable Pi extensions in `pi-ad-hooks/` and `pi-ad-task/`. Each `index.ts` is the Pi-facing entry point and composition root. This contract covers extension implementation, not the design of Pi skills, prompts, themes, or MCP servers.
 
 The `pi-plugins` package is the canonical distribution path. Its root manifest lists extension entry points; extension directories and extension-owned configuration/script paths use the `pi-ad-<name>` convention. See [package distribution](pi-plugin-distribution.md) for installation and legacy-path conflicts.
 
@@ -27,7 +27,6 @@ The `pi-plugins` package is the canonical distribution path. Its root manifest l
 - Respect cancellation and session replacement. Make shutdown cleanup idempotent.
 - Separate transient from permanent failures. Make retries and backoff named, testable, and documented when user-visible. Avoid unhandled rejections and secret-bearing diagnostics.
 - Treat commands, tools, settings, persisted formats, and visible behavior as compatibility surfaces. Document and test behavior changes.
-- Every operator-facing slash command in a first-party extension, except Telegram bridge lifecycle controls (`/telegram*`), must be available in the TUI and callable in Telegram when its extension is loaded and the Telegram bridge is enabled. Telegram use is limited to allow-listed users in private chats. Busy-session handling is command-specific: task status and lifecycle controls remain available without cancelling the current operation, task start/resume require an idle Pi session and Telegram bridge, and other generic extension commands are rejected rather than queued. Use unique Telegram-compatible names that do not collide with bot commands and account for Telegram's 100-command menu limit. Telegram-native bot commands and third-party extensions are outside this parity requirement; see [Telegram bridge](pi-ad-telegram.md) for name mapping and runtime constraints.
 
 ## Language and diagrams
 
@@ -44,7 +43,7 @@ Use topic branches and pull requests; do not push directly to the default branch
 
 Add regression tests for behavior changes. Use injected fakes rather than live network or real credentials. Cover cancellation, failures, authorization, persistence/restart, and compatibility where affected.
 
-Run `npm test`, `npm run typecheck`, `npm run docs:check`, and `git diff --check`. Keep tests in root scripts and extension documentation aligned with source. Never commit credentials, Telegram inbox data, dependency folders, or local runtime state.
+Run `npm test`, `npm run typecheck`, `npm run docs:check`, and `git diff --check`. Keep tests in root scripts and extension documentation aligned with source. Never commit credentials, dependency folders, or local runtime state.
 
 ## Non-goals
 
@@ -54,9 +53,7 @@ Run `npm test`, `npm run typecheck`, `npm run docs:check`, and `git diff --check
 
 ## Related contracts
 
-- [Telegram bridge](pi-ad-telegram.md)
 - [Pi event hooks](pi-event-hooks.md)
 - [Bounded Pi tasks](pi-ad-task.md)
-- [Session usage reporting](session-usage-reporting.md)
 - [Pi plugin package distribution](pi-plugin-distribution.md)
 - [Contract lifecycle](../meta-contract.md)

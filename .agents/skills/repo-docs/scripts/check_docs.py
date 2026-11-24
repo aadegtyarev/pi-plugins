@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 SKIP_DIRS = {
-    ".git", ".venv", "venv", "node_modules", ".pi-subagents", ".telegram-inbox",
+    ".git", ".venv", "venv", "node_modules", ".pi-subagents",
     "__pycache__", ".mypy_cache",
     ".ruff_cache", ".pytest_cache", "dist", "build", ".tox", "target",
 }

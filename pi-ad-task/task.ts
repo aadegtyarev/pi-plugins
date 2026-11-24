@@ -1,14 +1,46 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { countReviewRejections, REVIEW_REJECTION_LIMIT, reviewLimitReport } from "./review-limit.ts";
+import { countReviewRejections, REVIEW_REJECTION_LIMIT, REVIEW_VERDICT_ENTRY, reviewLimitReport, scanReviewVerdicts } from "./review-limit.ts";
+import { createSubagentMonitor, DEFAULT_STATUS_TIMEOUT_MS, SUBAGENT_ASYNC_COMPLETE_EVENT, type SubagentMonitor } from "./subagents.ts";
 
 const ENTRY_TYPE = "pi-ad-hooks-task";
 const MESSAGE_TYPE = "pi-ad-hooks-task-continuation";
 const DEFAULT_CONTINUATION_LIMIT = 40;
-const TELEGRAM_ROUTE_EVENT = "pi-ad-task:telegram-route";
+/** Grace period after a subagent completes for pi-subagents' own wake to start a run before the task starts one. */
+export const DEFAULT_WAKE_DELAY_MS = 2000;
 
-function routeTaskResponseToTelegram(pi: ExtensionAPI, chatId: number | undefined): void {
-  if (chatId !== undefined) pi.events?.emit?.(TELEGRAM_ROUTE_EVENT, { chatId });
+export interface TaskOptions {
+  statusTimeoutMs?: number;
+  wakeDelayMs?: number;
+}
+
+/** Per-extension runtime state that is not persisted: what the task is waiting for right now. */
+interface Runtime {
+  monitor: SubagentMonitor;
+  wakeDelayMs: number;
+  /** Background subagents the task is waiting for; 0 when it is not waiting. */
+  waiting: number;
+  ctx?: ExtensionContext;
+  wakeTimer?: ReturnType<typeof setTimeout>;
+}
+const runtimes = new WeakMap<ExtensionAPI, Runtime>();
+
+function runtime(pi: ExtensionAPI): Runtime | undefined {
+  return runtimes.get(pi);
+}
+
+function stopWaiting(rt: Runtime | undefined): void {
+  if (!rt) return;
+  rt.waiting = 0;
+  if (rt.wakeTimer) clearTimeout(rt.wakeTimer);
+  rt.wakeTimer = undefined;
+}
+
+/** Forget runtime waiting state when a run starts or the session changes. */
+export function resetTaskRuntime(pi: ExtensionAPI, options: { forgetContext?: boolean } = {}): void {
+  const rt = runtime(pi);
+  stopWaiting(rt);
+  if (rt && options.forgetContext) rt.ctx = undefined;
 }
 
 export const TASK_HELP = [
@@ -34,7 +66,6 @@ interface TaskState {
   status: Status;
   continuations: number;
   continuationLimit?: number | null;
-  telegramChatId?: number;
   /** Reviewer rejections already on the branch when the current task cycle began. */
   reviewRejectionBaseline?: number;
 }
@@ -52,7 +83,6 @@ function isState(value: unknown): value is TaskState {
     ["active", "paused", "done", "stopped", "blocked"].includes(state.status ?? "") &&
     Number.isSafeInteger(state.continuations) && (state.continuations ?? -1) >= 0 &&
     (state.continuationLimit === undefined || state.continuationLimit === null || (Number.isSafeInteger(state.continuationLimit) && state.continuationLimit >= 0)) &&
-    (state.telegramChatId === undefined || (Number.isSafeInteger(state.telegramChatId) && state.telegramChatId > 0)) &&
     (state.reviewRejectionBaseline === undefined || (Number.isSafeInteger(state.reviewRejectionBaseline) && state.reviewRejectionBaseline >= 0));
 }
 
@@ -61,7 +91,11 @@ function current(ctx: ExtensionContext): TaskState | undefined {
   const branch = ctx.sessionManager.getBranch();
   for (let i = branch.length - 1; i >= 0; i--) {
     const entry = branch[i] as { type?: string; customType?: string; data?: unknown };
-    if (entry.type === "custom" && entry.customType === ENTRY_TYPE) return isState(entry.data) ? { continuationLimit: DEFAULT_CONTINUATION_LIMIT, ...entry.data } : undefined;
+    if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE) continue;
+    if (!isState(entry.data)) return undefined;
+    // Keep only known fields so fields from older releases are not written back.
+    const { version, goal, progress, status, continuations, continuationLimit = DEFAULT_CONTINUATION_LIMIT, reviewRejectionBaseline } = entry.data;
+    return { version, goal, progress, status, continuations, continuationLimit, ...(reviewRejectionBaseline === undefined ? {} : { reviewRejectionBaseline }) };
   }
   return undefined;
 }
@@ -90,37 +124,39 @@ function extractGoal(value: string): string {
   return text;
 }
 
-function taskStatus(state: TaskState | undefined): string {
+function taskStatus(state: TaskState | undefined, waiting = 0): string {
   if (!state) return `No task is recorded on this session branch.\nTo start one: /task <goal>\n\n${TASK_HELP}`;
   const progress = state.progress || "No progress recorded yet.";
   const next = state.status === "blocked" ? "Reply to the blocker: /task resume <your answer>." :
     state.status === "paused" ? "Resume with /task resume." :
-      state.status === "active" ? "The task will continue automatically after a successful step." :
+      state.status === "active" ? (waiting > 0
+        ? `Waiting for ${waiting} background subagent${waiting === 1 ? "" : "s"} to finish; the task continues when ${waiting === 1 ? "it reports" : "they report"}.`
+        : "The task will continue automatically after a successful step.") :
         state.status === "done" ? "The task is complete." : "The task is stopped. Start another with /task start <goal>.";
   const limit = state.continuationLimit === null ? "unlimited" : String(state.continuationLimit ?? DEFAULT_CONTINUATION_LIMIT);
   return `Task: ${state.status}\nGoal: ${state.goal}\nProgress: ${progress}\nAutomatic continuations: ${state.continuations}/${limit}\n${next}`;
 }
 
-export function getTaskSummary(ctx: ExtensionContext): { status: Status; goal: string; telegramChatId?: number } | undefined {
+export function getTaskSummary(ctx: ExtensionContext): { status: Status; goal: string } | undefined {
   const state = current(ctx);
-  return state ? { status: state.status, goal: state.goal, ...(state.telegramChatId === undefined ? {} : { telegramChatId: state.telegramChatId }) } : undefined;
+  return state ? { status: state.status, goal: state.goal } : undefined;
 }
 
 function result(message: string, tone: TaskCommandResult["tone"] = "info", prompt?: string): TaskCommandResult {
   return { message, tone, ...(prompt === undefined ? {} : { prompt }) };
 }
 
-/** Shared command implementation for Pi's TUI and the Telegram bridge. */
-export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionContext, options: { telegramChatId?: number; operationBusy?: boolean } = {}): TaskCommandResult {
+/** Implementation of the `/task` slash command. */
+export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionContext): TaskCommandResult {
   const match = /^([^\s]+)(?:\s+([\s\S]*))?$/.exec(args.trim());
   const action = match?.[1]?.toLowerCase();
   const value = match?.[2]?.trim() ?? "";
   const state = current(ctx);
-  const operationBusy = options.operationBusy ?? !ctx.isIdle();
+  const operationBusy = !ctx.isIdle();
 
   const managementActions = ["start", "status", "pause", "resume", "limit", "done", "stop"];
   if (!action) return result(TASK_HELP);
-  if (action === "status") return result(`${taskStatus(state)}${operationBusy ? "\nCurrent operation is still in progress; task status does not cancel it." : ""}`);
+  if (action === "status") return result(`${taskStatus(state, runtime(pi)?.waiting)}${operationBusy ? "\nCurrent operation is still in progress; task status does not cancel it." : ""}`);
 
   if (action === "start" || !managementActions.includes(action)) {
     const goal = extractGoal(action === "start" ? value : args);
@@ -138,7 +174,7 @@ export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCon
           "Wait for the current run to finish or use /task stop, then /task start <new goal>.";
       return result(`Task not started: a task is already ${state.status}: ${state.goal}\n${recover}`, "warning");
     }
-    const next: TaskState = { version: 1, goal, progress: "", status: "active", continuations: 0, continuationLimit: DEFAULT_CONTINUATION_LIMIT, reviewRejectionBaseline: reviewRejections(ctx), ...(options.telegramChatId === undefined ? {} : { telegramChatId: options.telegramChatId }) };
+    const next: TaskState = { version: 1, goal, progress: "", status: "active", continuations: 0, continuationLimit: DEFAULT_CONTINUATION_LIMIT, reviewRejectionBaseline: reviewRejections(ctx) };
     persist(pi, next);
     expose(pi, true);
     return result(`✅ Task started.\nGoal: ${goal}\nUse /task status to check progress, /task pause to pause, or /task stop to stop.`, "info", goal);
@@ -206,16 +242,12 @@ export function runTaskCommand(pi: ExtensionAPI, args: string, ctx: ExtensionCon
   return result(TASK_HELP, "warning");
 }
 
-export function registerTaskContinuation(pi: ExtensionAPI): void {
-  // Keep event-only host fakes and older minimal hosts functional; Pi 0.99 exposes both APIs.
+export function registerTaskContinuation(pi: ExtensionAPI, options: TaskOptions = {}): void {
+  const rt: Runtime = { monitor: createSubagentMonitor(pi, options.statusTimeoutMs ?? DEFAULT_STATUS_TIMEOUT_MS), wakeDelayMs: options.wakeDelayMs ?? DEFAULT_WAKE_DELAY_MS, waiting: 0 };
+  runtimes.set(pi, rt);
+  pi.events?.on?.(SUBAGENT_ASYNC_COMPLETE_EVENT, () => scheduleWake(pi, rt));
+  // Keep event-only host fakes and older minimal hosts functional; Pi 1.6 exposes both APIs.
   if (typeof pi.registerTool !== "function") return;
-  let telegramChatId: number | undefined;
-  pi.events?.on("pi-ad-telegram:run-chat", (event) => {
-    const chatId = (event as { chatId?: unknown } | undefined)?.chatId;
-    telegramChatId = Number.isSafeInteger(chatId) && Number(chatId) > 0 ? Number(chatId) : undefined;
-  });
-  pi.on("agent_settled", () => { telegramChatId = undefined; });
-
   pi.registerTool({
     name: "task_control",
     label: "Control task",
@@ -229,17 +261,12 @@ export function registerTaskContinuation(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, _signal, _update, ctx: ExtensionToolContext) {
       const state = current(ctx);
-      const canReplaceTerminalTask = params.action === "start" && state && ["done", "stopped"].includes(state.status);
-      if (telegramChatId !== undefined && state && state.telegramChatId !== telegramChatId && !canReplaceTerminalTask) {
-        return { content: [{ type: "text", text: "This Telegram chat cannot manage the task because it was created in Pi or belongs to another chat. Use the originating chat or manage the task in Pi." }], details: undefined, isError: true };
-      }
-      if (params.action !== "start") routeTaskResponseToTelegram(pi, state?.telegramChatId);
-      if (params.action === "status") return { content: [{ type: "text", text: taskStatus(state) }], details: undefined };
+      if (params.action === "status") return { content: [{ type: "text", text: taskStatus(state, rt.waiting) }], details: undefined };
       if (params.action === "start") {
         const goal = params.goal?.trim();
         if (!goal) return { content: [{ type: "text", text: "Provide a goal to start a task; the operator must explicitly request that it be started." }], details: undefined, isError: true };
         if (state && !["done", "stopped"].includes(state.status)) return { content: [{ type: "text", text: `A task is already ${state.status}: ${state.goal}. Resume it or stop it with /task stop before starting another.` }], details: undefined, isError: true };
-        const next: TaskState = { version: 1, goal, progress: "", status: "active", continuations: 0, continuationLimit: DEFAULT_CONTINUATION_LIMIT, reviewRejectionBaseline: reviewRejections(ctx), ...(telegramChatId === undefined ? {} : { telegramChatId }) };
+        const next: TaskState = { version: 1, goal, progress: "", status: "active", continuations: 0, continuationLimit: DEFAULT_CONTINUATION_LIMIT, reviewRejectionBaseline: reviewRejections(ctx) };
         persist(pi, next);
         expose(pi, true);
         return { content: [{ type: "text", text: `Task started: ${goal}. Work toward this goal and record progress with task_update.` }], details: undefined };
@@ -279,12 +306,14 @@ export function registerTaskContinuation(pi: ExtensionAPI): void {
       note: Type.Optional(Type.String({ description: "Progress, completion summary, or blocker. Do not include secrets." })),
     }),
     async execute(_id, params, _signal, _update, ctx: ExtensionToolContext) {
+      if (params.action === "done" && current(ctx)?.status === "active") {
+        const running = await rt.monitor.activeCount();
+        if (running !== undefined && running > 0) {
+          return { content: [{ type: "text", text: `${running} background subagent${running === 1 ? " is" : "s are"} still running. Do not mark the task done yet: wait for their results (pi-subagents reports each one), check them, and then finish the goal.` }], details: undefined, isError: true };
+        }
+      }
       const state = current(ctx);
       if (!state) return { content: [{ type: "text", text: "There is no active task to update. Start one with /task start <goal>." }], details: undefined, isError: true };
-      if (telegramChatId !== undefined && state.telegramChatId !== telegramChatId) {
-        return { content: [{ type: "text", text: "This Telegram chat cannot update the task because it was created in Pi or belongs to another chat. Use the originating chat or manage the task in Pi." }], details: undefined, isError: true };
-      }
-      routeTaskResponseToTelegram(pi, state.telegramChatId);
       if (state.status !== "active") {
         const recovery = ["paused", "blocked"].includes(state.status)
           ? (state.status === "blocked" ? "Reply to the blocker with /task resume <answer>." : "Resume the task with /task resume.")
@@ -309,20 +338,72 @@ export function restoreTaskTools(pi: ExtensionAPI, ctx: ExtensionContext | undef
   expose(pi, current(ctx)?.status === "active");
 }
 
-export function continueTask(pi: ExtensionAPI, event: import("@earendil-works/pi-coding-agent").AgentBeforeSettleEvent, ctx: ExtensionContext) {
+function continuationText(state: TaskState): string {
+  return `Continue the active task. Goal: ${state.goal}${state.progress ? `\nProgress so far: ${state.progress}` : ""}. Continue working; use task_update to record progress, mark done, or report a blocker.`;
+}
+
+/** Counts one automatic continuation, or pauses the task when its limit is used up. Returns false when paused. */
+function takeStep(pi: ExtensionAPI, ctx: ExtensionContext, state: TaskState): boolean {
+  const limit = state.continuationLimit ?? DEFAULT_CONTINUATION_LIMIT;
+  if (state.continuationLimit !== null && state.continuations >= limit) {
+    state.status = "paused";
+    persist(pi, state); expose(pi, false);
+    ctx.ui.notify(`Task paused after ${state.continuations} automatic continuations (limit ${limit}). Check progress with /task status; use /task resume [answer] to continue.`, "warning");
+    return false;
+  }
+  state.continuations = Math.min(state.continuations + 1, Number.MAX_SAFE_INTEGER);
+  persist(pi, state);
+  return true;
+}
+
+/**
+ * After a background subagent completes, pi-subagents normally wakes the parent itself.
+ * If no run has started after a grace period and nothing is still running, start the next step here.
+ */
+function scheduleWake(pi: ExtensionAPI, rt: Runtime): void {
+  if (rt.waiting === 0 || !rt.ctx) return;
+  if (rt.wakeTimer) clearTimeout(rt.wakeTimer);
+  rt.wakeTimer = setTimeout(async () => {
+    rt.wakeTimer = undefined;
+    const ctx = rt.ctx;
+    if (rt.waiting === 0 || !ctx || !ctx.isIdle()) return;
+    const running = await rt.monitor.activeCount();
+    if (rt.waiting === 0 || !ctx.isIdle()) return;
+    if (running === undefined || running > 0) {
+      if (running) rt.waiting = running;
+      return;
+    }
+    const state = current(ctx);
+    rt.waiting = 0;
+    if (!state || state.status !== "active" || !takeStep(pi, ctx, state)) return;
+    try {
+      pi.sendMessage({ customType: MESSAGE_TYPE, content: continuationText(state), display: false }, { triggerTurn: true });
+    } catch {
+      ctx.ui.notify("The task could not start its next step after the subagents finished. Continue with /task resume.", "warning");
+    }
+  }, rt.wakeDelayMs);
+}
+
+export async function continueTask(pi: ExtensionAPI, event: import("@earendil-works/pi-coding-agent").AgentBeforeSettleEvent, ctx: ExtensionContext) {
+  if (current(ctx)?.status !== "active") return;
+  const rt = runtime(pi);
+  if (rt) rt.ctx = ctx;
+  // Ask before deciding so a slow reply cannot interleave with the state changes below.
+  const running = event.outcome === "completed" && rt ? await rt.monitor.activeCount() : undefined;
   const state = current(ctx);
   if (!state || state.status !== "active") return;
-  routeTaskResponseToTelegram(pi, state.telegramChatId);
   if (event.outcome !== "completed") {
     state.status = "paused";
     persist(pi, state); expose(pi, false);
     ctx.ui.notify(`Task paused because the Pi run ended with outcome ${event.outcome}. Check /task status and continue with /task resume [answer].`, "warning");
     return;
   }
-  const rejectionsOnBranch = reviewRejections(ctx);
-  state.reviewRejectionBaseline ??= rejectionsOnBranch;
-  const rejections = rejectionsOnBranch - state.reviewRejectionBaseline;
+  const scan = typeof ctx.sessionManager?.getBranch === "function" ? scanReviewVerdicts(ctx.sessionManager.getBranch()) : { rejections: 0, discovered: [] };
+  for (const verdict of scan.discovered) pi.appendEntry(REVIEW_VERDICT_ENTRY, verdict);
+  state.reviewRejectionBaseline ??= scan.rejections;
+  const rejections = scan.rejections - state.reviewRejectionBaseline;
   if (rejections >= REVIEW_REJECTION_LIMIT) {
+    stopWaiting(rt);
     state.status = "blocked";
     state.progress = `${state.progress}${state.progress ? "\n" : ""}Blocked after ${rejections} rejected review rounds; waiting for the operator.`;
     persist(pi, state); expose(pi, false);
@@ -332,22 +413,15 @@ export function continueTask(pi: ExtensionAPI, event: import("@earendil-works/pi
       continue: true,
     };
   }
-  const limit = state.continuationLimit ?? DEFAULT_CONTINUATION_LIMIT;
-  if (state.continuationLimit !== null && state.continuations >= limit) {
-    state.status = "paused";
-    persist(pi, state); expose(pi, false);
-    ctx.ui.notify(`Task paused after ${state.continuations} automatic continuations (limit ${limit}). Check progress with /task status; use /task resume [answer] to continue.`, "warning");
+  if (rt && running !== undefined && running > 0) {
+    // pi-subagents wakes the parent when a subagent finishes; a step now would only poll.
+    rt.waiting = running;
     return;
   }
-  state.continuations = Math.min(state.continuations + 1, Number.MAX_SAFE_INTEGER);
-  persist(pi, state);
+  stopWaiting(rt);
+  if (!takeStep(pi, ctx, state)) return;
   return {
-    entries: [...event.entries, {
-      type: "custom_message" as const,
-      customType: MESSAGE_TYPE,
-      content: `Continue the active task. Goal: ${state.goal}${state.progress ? `\nProgress so far: ${state.progress}` : ""}. Continue working; use task_update to record progress, mark done, or report a blocker.`,
-      display: false,
-    }],
+    entries: [...event.entries, { type: "custom_message" as const, customType: MESSAGE_TYPE, content: continuationText(state), display: false }],
     continue: true,
   };
 }

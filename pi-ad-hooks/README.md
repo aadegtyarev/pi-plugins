@@ -1,28 +1,58 @@
 # pi-ad-hooks
 
-Add configured context to Pi requests or run trusted local scripts when public Pi events fire. Hooks are advisory: they cannot approve, block, cancel, or rewrite Pi operations.
+Hooks let you react to things that happen in Pi without writing an extension. You describe them in one JSON file, and the extension does one of three things when the chosen event fires:
 
-## Set up a hook
+- **`system_prompt`** — add your text to Pi's system prompt for each request. Good for standing rules like "always answer in English".
+- **`prompt`** — slip a one-time hidden note into the next model request.
+- **`script`** — run your own Node.js script and hand it the event data. Good for logging, notifications on your machine, and so on.
 
-Install `pi-plugins` using the [root instructions](../README.md). Save configuration at `<agent-dir>/pi-ad-hooks.json`; scripts, if used, belong under `<agent-dir>/pi-ad-hooks/`. Project-local configuration is not loaded.
+Hooks only add things. They cannot block a tool, cancel a request, or change Pi's answer.
 
-This example appends a standing instruction to each agent run:
+## Your first hook
+
+Create `~/.pi/agent/pi-ad-hooks.json` (or the same file in your own Pi agent directory, if you changed it):
 
 ```json
 {
   "version": 1,
   "hooks": {
     "before_agent_start": [
-      { "id": "operator-reply-language", "type": "system_prompt", "text": "Reply in English." }
+      { "id": "reply-language", "type": "system_prompt", "text": "Reply in English." }
     ]
   }
 }
 ```
 
-Use `system_prompt` on `before_agent_start` for run-wide instructions. It appends to Pi's system prompt; it does not replace it or add a user-style message. The separate `prompt` action adds advisory context to the next ordinary request.
+Run `/reload` in Pi or restart it. From now on every request carries that instruction.
 
-## Trust and limits
+If all you need is a fixed system-prompt addition, Pi can also do that without this extension: put the text in `~/.pi/agent/APPEND_SYSTEM.md`.
 
-Scripts are trusted `.mjs` programs, not sandboxed. They run with your operating-system permissions and may receive sensitive event data. Only configure scripts you trust. Their output is ignored, and failures do not block Pi.
+## Running a script
 
-See the [event and configuration reference](reference.md) for all supported events, action shapes, timing, timeouts, diagnostics, and migration notes. Task continuation is a separate [extension](../pi-ad-task/README.md). The [hooks contract](../docs/contracts/surfaces/pi-event-hooks.md) records guarantees and non-goals.
+```json
+{
+  "version": 1,
+  "hooks": {
+    "turn_end": [
+      { "id": "log-turns", "type": "script", "script": "log-turn.mjs" }
+    ]
+  }
+}
+```
+
+Put `log-turn.mjs` in `~/.pi/agent/pi-ad-hooks/`. It receives the event as JSON on standard input:
+
+```js
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const { event, payload } = JSON.parse(input);
+// do something with it
+```
+
+Scripts are **not sandboxed**: they run as you and can see prompts, file paths and tool arguments in the event data. Only use scripts you wrote or trust. Pi does not wait for a script, ignores its output, and keeps working if it fails.
+
+## More
+
+- [Reference](reference.md): every supported event, all options, limits, and error messages.
+- [Hooks contract](../docs/contracts/surfaces/pi-event-hooks.md): exact guarantees.
+- Running Pi on a goal until it is done is a separate extension: [`pi-ad-task`](../pi-ad-task/README.md).
