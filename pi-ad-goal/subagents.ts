@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Documented pi-subagents extension API: see "In-process event-bus RPC" in the pi-subagents extension API guide.
-const RPC_READY_EVENT = "subagents:rpc:v1:ready";
-const RPC_REQUEST_EVENT = "subagents:rpc:v1:request";
-const RPC_REPLY_EVENT_PREFIX = "subagents:rpc:v1:reply:";
-const SUBAGENT_ASYNC_STARTED_EVENT = "subagent:async-started";
+export const RPC_READY_EVENT = "subagents:rpc:v1:ready";
+export const RPC_REQUEST_EVENT = "subagents:rpc:v1:request";
+export const RPC_REPLY_EVENT_PREFIX = "subagents:rpc:v1:reply:";
+export const SUBAGENT_ASYNC_STARTED_EVENT = "subagent:async-started";
 export const SUBAGENT_ASYNC_COMPLETE_EVENT = "subagent:async-complete";
 
 /** How long to wait for a pi-subagents status reply before treating it as unavailable. */

@@ -8,7 +8,7 @@ The `pi-plugins` Git repository is the canonical source for two first-party Pi e
 
 - Install the public Git package with `pi install git:github.com/aadegtyarev/pi-plugins`. No GitHub credentials are needed to install.
 - The package exposes exactly the three extension entry points above. Pi runs `npm install` for a Git package, which installs the pinned pi-subagents. Installing does not configure hook preferences or pi-subagents settings.
-- Update pi-subagents only together with a check that its RPC `status` reply, completion events, completion-notice formats, and `Full output:` reference still match what `pi-ad-goal` parses.
+- pi-subagents follows its upstream release cycle: Dependabot opens a PR per release, CI runs the compatibility test (`pi-ad-goal/subagents-compat.test.mts`), which executes the release's own RPC constants, completion-notice and output-capping code and a real Pi with the package loaded, and the PR auto-merges only when CI passes. A release that changes what `pi-ad-goal` parses stays unmerged until the code is adapted. Installed copies pick the new version up on the next `pi update`; Pi must then be restarted, because `/reload` cannot replace already loaded pi-subagents modules.
 - The extensions use Pi host APIs. Development dependencies support typechecking and tests; Pi runtime modules and `typebox` are peer dependencies, not bundled copies.
 - Pi records the package at personal scope by default. Updates follow Pi's package manager; this repository does not automatically update a user's installed version.
 

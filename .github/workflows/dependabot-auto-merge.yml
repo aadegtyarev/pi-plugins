@@ -1,0 +1,22 @@
+name: Dependabot auto-merge
+
+# Queues a squash merge for pi-subagents update PRs. GitHub merges only after the
+# required CI check passes; a release that breaks the compatibility test stays open.
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@v2
+      - if: steps.meta.outputs.dependency-names == 'pi-subagents'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
