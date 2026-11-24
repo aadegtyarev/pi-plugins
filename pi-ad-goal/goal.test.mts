@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createTaskExtension } from "./index.ts";
+import { createGoalExtension } from "./index.ts";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 function harness() {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "pi-ad-hooks-task-"));
+  const dir = mkdtempSync(path.join(os.tmpdir(), "pi-ad-goal-"));
   const handlers = new Map<string, (event: any, ctx: any) => any>();
   const sharedEvents = new Map<string, Set<(event: unknown) => void>>();
   const emittedEvents: Array<{ name: string; event: unknown }> = [];
@@ -45,29 +45,29 @@ function harness() {
   };
   const oldDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
-  createTaskExtension({ statusTimeoutMs: 30, wakeDelayMs: 20 })(pi);
+  createGoalExtension({ statusTimeoutMs: 30, wakeDelayMs: 20 })(pi);
   if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldDir;
-  return { dir, handlers, command: (args: string, context: any) => command!(args, context), tool: (name = "task_update") => tools.get(name), emit: (name: string, value: unknown) => pi.events.emit(name, value), emittedEvents, customSent, pi, entries, notifications, sent, ctx, activeTools, setIdle: (value: boolean) => { idle = value; }, setSendError: (value: unknown) => { sendError = value; }, setBranch: (value: any[]) => { branch = value; } };
+  return { dir, handlers, command: (args: string, context: any) => command!(args, context), tool: (name = "goal_update") => tools.get(name), emit: (name: string, value: unknown) => pi.events.emit(name, value), emittedEvents, customSent, pi, entries, notifications, sent, ctx, activeTools, setIdle: (value: boolean) => { idle = value; }, setSendError: (value: unknown) => { sendError = value; }, setBranch: (value: any[]) => { branch = value; } };
 }
 
-test("task commands show help, persist bare or explicit goals, and control the task-only tool", async () => {
+test("goal commands show help, persist bare or explicit goals, and control the goal-only tool", async () => {
   const h = harness();
   try {
     await h.command("", h.ctx);
-    assert.match(h.notifications.at(-1)!, /\/task <goal>/);
+    assert.match(h.notifications.at(-1)!, /\/goal <goal>/);
     assert.match(h.notifications.at(-1)!, /default of 40/);
     await h.command('start "Ship the feature"', h.ctx);
     assert.deepEqual(h.sent, ["Ship the feature"]);
-    assert.match(h.notifications.at(-1)!, /Task started/);
-    assert.equal(h.entries.at(-1).customType, "pi-ad-hooks-task");
+    assert.match(h.notifications.at(-1)!, /Goal started/);
+    assert.equal(h.entries.at(-1).customType, "pi-ad-goal");
     assert.equal(h.entries.at(-1).data.status, "active");
-    assert.equal(h.activeTools.has("task_update"), true);
+    assert.equal(h.activeTools.has("goal_update"), true);
     await h.command("status", h.ctx);
     await h.command("pause", h.ctx);
     assert.match(h.notifications.at(-1)!, /Automatic continuation paused/);
     assert.equal(h.entries.at(-1).data.status, "paused");
     assert.equal(h.entries[0].data.status, "active");
-    assert.equal(h.activeTools.has("task_update"), false);
+    assert.equal(h.activeTools.has("goal_update"), false);
     await h.command("resume", h.ctx);
     assert.equal(h.entries.at(-1).data.status, "active");
     assert.equal(h.entries.at(-2).data.status, "paused");
@@ -82,14 +82,14 @@ test("task commands show help, persist bare or explicit goals, and control the t
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("task control tool starts and manages only operator-requested single task", async () => {
+test("goal control tool starts and manages only operator-requested single goal", async () => {
   const h = harness();
   try {
-    const control = h.tool("task_control");
+    const control = h.tool("goal_control");
     const started = await control.execute("id", { action: "start", goal: "Explicitly approved goal" }, undefined, undefined, h.ctx);
-    assert.match(started.content[0].text, /Task started/);
+    assert.match(started.content[0].text, /Goal started/);
     assert.equal(h.entries.at(-1).data.goal, "Explicitly approved goal");
-    const duplicate = await control.execute("id", { action: "start", goal: "Second task" }, undefined, undefined, h.ctx);
+    const duplicate = await control.execute("id", { action: "start", goal: "Second goal" }, undefined, undefined, h.ctx);
     assert.equal(duplicate.isError, true);
     assert.equal(h.entries.at(-1).data.goal, "Explicitly approved goal");
     await h.handlers.get("agent_before_settle")!({ outcome: "completed", entries: [], context: {} }, h.ctx);
@@ -105,56 +105,57 @@ test("task control tool starts and manages only operator-requested single task",
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("legacy task state with unknown fields still loads and those fields are dropped on the next write", async () => {
+test("legacy goal state with unknown fields still loads and those fields are dropped on the next write", async () => {
   const h = harness();
   try {
     h.entries.push({ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "Legacy goal", progress: "", status: "paused", continuations: 3, continuationLimit: 40, legacyRoute: 42 } });
     await h.command("resume", h.ctx);
     assert.equal(h.entries.at(-1).data.status, "active");
     assert.equal(h.entries.at(-1).data.goal, "Legacy goal");
+    assert.equal(h.entries.at(-1).customType, "pi-ad-goal");
     assert.equal("legacyRoute" in h.entries.at(-1).data, false);
     assert.deepEqual(h.emittedEvents.filter(({ name }) => !name.startsWith("subagents:rpc:v1:")), []);
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("task command errors always point to an actionable recovery", async () => {
+test("goal command errors always point to an actionable recovery", async () => {
   const h = harness();
   try {
     await h.command("resume", h.ctx);
-    assert.match(h.notifications.at(-1)!, /\/task <goal>/);
+    assert.match(h.notifications.at(-1)!, /\/goal <goal>/);
     await h.command("start recovery goal", h.ctx);
     await h.command("pause", h.ctx);
     await h.command("pause", h.ctx);
-    assert.match(h.notifications.at(-1)!, /\/task resume/);
+    assert.match(h.notifications.at(-1)!, /\/goal resume/);
     await h.command("resume", h.ctx);
     await h.command("done", h.ctx);
     await h.command("done", h.ctx);
-    assert.match(h.notifications.at(-1)!, /\/task status/);
-    assert.match(h.notifications.at(-1)!, /\/task start <goal>/);
+    assert.match(h.notifications.at(-1)!, /\/goal status/);
+    assert.match(h.notifications.at(-1)!, /\/goal start <goal>/);
     await h.command("stop", h.ctx);
     assert.match(h.notifications.at(-1)!, /already done/);
-    assert.match(h.notifications.at(-1)!, /\/task start <goal>/);
+    assert.match(h.notifications.at(-1)!, /\/goal start <goal>/);
     await h.command("start another goal", h.ctx);
     await h.command("stop", h.ctx);
     assert.match(h.notifications.at(-1)!, /Automatic continuation stopped/);
     await h.command("stop", h.ctx);
     assert.match(h.notifications.at(-1)!, /already stopped/);
-    assert.match(h.notifications.at(-1)!, /\/task start <goal>/);
+    assert.match(h.notifications.at(-1)!, /\/goal start <goal>/);
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("TUI dispatch failure pauses the task and explains how to recover", async () => {
+test("TUI dispatch failure pauses the goal and explains how to recover", async () => {
   const h = harness();
   try {
     h.setSendError(new Error("synthetic rejection"));
     await h.command("start rejected goal", h.ctx);
     assert.equal(h.entries.at(-1).data.status, "paused");
-    assert.match(h.notifications.at(-1)!, /could not accept the task/);
-    assert.match(h.notifications.at(-1)!, /\/task resume/);
+    assert.match(h.notifications.at(-1)!, /could not accept the goal/);
+    assert.match(h.notifications.at(-1)!, /\/goal resume/);
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("task tool records progress and done/blocked transitions without diagnostics", async () => {
+test("goal tool records progress and done/blocked transitions without diagnostics", async () => {
   const h = harness();
   try {
     await h.command("start Keep private details", h.ctx);
@@ -168,30 +169,30 @@ test("task tool records progress and done/blocked transitions without diagnostic
     assert.equal(h.entries.at(-2).data.status, "active");
     assert.equal(h.entries.at(-2).data.progress, "progress confidential");
     assert.equal(await h.handlers.get("agent_before_settle")!({ outcome: "completed", entries: [], context: {} }, h.ctx), undefined);
-    assert.equal(h.activeTools.has("task_update"), false);
+    assert.equal(h.activeTools.has("goal_update"), false);
     assert.equal(h.notifications.join(" ").includes("confidential"), false);
     await h.command("resume", h.ctx);
     await tool.execute("id", { action: "done", note: "completed" }, undefined, undefined, h.ctx);
     assert.equal(h.entries.at(-1).data.status, "done");
-    assert.deepEqual(h.emittedEvents.filter(({ name }) => !name.startsWith("subagents:rpc:v1:")), [], "task work emits nothing besides pi-subagents status requests");
+    assert.deepEqual(h.emittedEvents.filter(({ name }) => !name.startsWith("subagents:rpc:v1:")), [], "goal work emits nothing besides pi-subagents status requests");
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("blocked tasks reject replacement with recovery help and resume with the user's answer", async () => {
+test("blocked goals reject replacement with recovery help and resume with the user's answer", async () => {
   const h = harness();
   try {
     await h.command("start awaiting approval", h.ctx);
     const blockedResult = await h.tool().execute("id", { action: "blocked", note: "waiting for approval" }, undefined, undefined, h.ctx);
-    assert.match(blockedResult.content[0].text, /\/task resume <answer>/);
+    assert.match(blockedResult.content[0].text, /\/goal resume <answer>/);
     const stateCount = h.entries.length;
     await h.command("start replacement", h.ctx);
     assert.equal(h.entries.length, stateCount);
-    assert.match(h.notifications.at(-1)!, /Task not started/);
-    assert.match(h.notifications.at(-1)!, /\/task resume <blocker answer>/);
+    assert.match(h.notifications.at(-1)!, /Goal not started/);
+    assert.match(h.notifications.at(-1)!, /\/goal resume <blocker answer>/);
     await h.command("resume Подтверждаю scope и merge gate", h.ctx);
     assert.equal(h.entries.at(-1).data.status, "active");
     assert.match(h.sent.at(-1)!, /User response: Подтверждаю scope и merge gate/);
-    assert.match(h.notifications.at(-1)!, /Task resumed/);
+    assert.match(h.notifications.at(-1)!, /Goal resumed/);
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
@@ -204,7 +205,7 @@ test("settle continuation is bounded, persisted, and skipped for terminal or fai
     for (let count = 1; count <= 20; count++) {
       const result = await settle({ outcome: "completed", entries: [], context: {} }, h.ctx);
       assert.equal(result.continue, true);
-      assert.equal(result.entries[0].customType, "pi-ad-hooks-task-continuation");
+      assert.equal(result.entries[0].customType, "pi-ad-goal-continuation");
       assert.equal(h.entries.at(-1).data.continuations, count);
       assert.equal(h.entries[count].data.continuations, count - 1);
     }
@@ -234,7 +235,7 @@ function reviewerNotice(verdict: string) {
   return { type: "custom_message", customType: "subagent-notify", content: `Background task completed: **reviewer**\n\nreviewer:\n## Review\n\n**${verdict}**\n\n- findings` };
 }
 
-test("task blocks with a report instruction after two rejected review rounds", async () => {
+test("goal blocks with a report instruction after two rejected review rounds", async () => {
   const h = harness();
   try {
     h.entries.push(reviewerNotice("REQUEST_CHANGES"));
@@ -245,7 +246,7 @@ test("task blocks with a report instruction after two rejected review rounds", a
     h.entries.push({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "## Review\n**REQUEST_CHANGES** quoted by the model" }] } });
     h.entries.push(reviewerNotice("APPROVE"));
     const once = await settle({ outcome: "completed", entries: [], context: {} }, h.ctx);
-    assert.equal(once.entries[0].content.startsWith("Continue the active task"), true);
+    assert.equal(once.entries[0].content.startsWith("Continue working toward the active goal"), true);
     h.entries.push({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "call-r", name: "subagent", arguments: { agent: "reviewer", task: "review" } }] } });
     h.entries.push({ type: "message", message: { role: "toolResult", toolName: "subagent", toolCallId: "call-r", content: [{ type: "text", text: "## Review — REQUEST_CHANGES\n- P1" }] } });
     const blocked = await settle({ outcome: "completed", entries: [], context: {} }, h.ctx);
@@ -257,15 +258,15 @@ test("task blocks with a report instruction after two rejected review rounds", a
     assert.equal(await settle({ outcome: "completed", entries: [], context: {} }, h.ctx), undefined);
     await h.command("resume accept as is", h.ctx);
     h.entries.push(reviewerNotice("REQUEST_CHANGES"));
-    assert.equal((await settle({ outcome: "completed", entries: [], context: {} }, h.ctx)).entries[0].content.startsWith("Continue the active task"), true);
+    assert.equal((await settle({ outcome: "completed", entries: [], context: {} }, h.ctx)).entries[0].content.startsWith("Continue working toward the active goal"), true);
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("review rejection counting ignores status views and starts legacy tasks from the current branch", async () => {
+test("review rejection counting ignores status views and starts legacy goals from the current branch", async () => {
   const h = harness();
   try {
     h.entries.push(reviewerNotice("REQUEST_CHANGES"), reviewerNotice("REQUEST_CHANGES"));
-    h.entries.push({ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "legacy", progress: "", status: "active", continuations: 0 } });
+    h.entries.push({ type: "custom", customType: "pi-ad-goal", data: { version: 1, goal: "legacy", progress: "", status: "active", continuations: 0 } });
     const settle = h.handlers.get("agent_before_settle")!;
     assert.equal((await settle({ outcome: "completed", entries: [], context: {} }, h.ctx)).continue, true);
     assert.equal(h.entries.at(-1).data.reviewRejectionBaseline, 2);
@@ -273,7 +274,7 @@ test("review rejection counting ignores status views and starts legacy tasks fro
     h.entries.push({ type: "message", message: { role: "toolResult", toolName: "subagent", toolCallId: "call-s", content: [{ type: "text", text: "Transcript\n## Review\n**REQUEST_CHANGES**" }] } });
     h.entries.push(reviewerNotice("REQUEST_CHANGES"));
     const result = await settle({ outcome: "completed", entries: [], context: {} }, h.ctx);
-    assert.equal(result.entries[0].content.startsWith("Continue the active task"), true);
+    assert.equal(result.entries[0].content.startsWith("Continue working toward the active goal"), true);
     assert.equal(h.entries.at(-1).data.status, "active");
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
@@ -295,7 +296,7 @@ test("review verdict parsing handles batched notices, approve-first wording, and
   assert.ok(performance.now() - started < 200);
 });
 
-test("task state controls stay available while busy and distinguish state changes from cancellation", async () => {
+test("goal state controls stay available while busy and distinguish state changes from cancellation", async () => {
   const h = harness();
   try {
     await h.command("start busy-controls goal", h.ctx);
@@ -314,8 +315,8 @@ test("task state controls stay available while busy and distinguish state change
     h.setIdle(false);
     await h.command("stop", h.ctx);
     assert.equal(h.entries.at(-1).data.status, "stopped");
-    assert.match(h.notifications.at(-1)!, /wait for it to finish before starting another task/);
-    assert.equal(h.sent.length, 2, "task-state controls do not submit model prompts");
+    assert.match(h.notifications.at(-1)!, /wait for it to finish before starting another goal/);
+    assert.equal(h.sent.length, 2, "goal-state controls do not submit model prompts");
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
@@ -327,7 +328,7 @@ test("busy start and resume reject before side effects or unrelated-run continua
     assert.match(h.notifications.at(-1)!, /Wait for the current run to finish/);
     assert.equal(h.entries.length, 0);
     assert.equal(h.sent.length, 0);
-    assert.equal(h.activeTools.has("task_update"), false);
+    assert.equal(h.activeTools.has("goal_update"), false);
     assert.equal(await h.handlers.get("agent_before_settle")!({ outcome: "completed", entries: [], context: {} }, h.ctx), undefined);
     assert.equal(h.entries.length, 0);
 
@@ -339,14 +340,14 @@ test("busy start and resume reject before side effects or unrelated-run continua
     await h.command("resume", h.ctx);
     assert.equal(h.entries.length, snapshotCount);
     assert.equal(h.entries.at(-1).data.status, "paused");
-    assert.equal(h.activeTools.has("task_update"), false);
+    assert.equal(h.activeTools.has("goal_update"), false);
     assert.equal(h.sent.length, 1);
     assert.equal(await h.handlers.get("agent_before_settle")!({ outcome: "completed", entries: [], context: {} }, h.ctx), undefined);
     assert.equal(h.entries.length, snapshotCount);
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("per-task continuation limits validate, persist across statuses, and migrate legacy state", async () => {
+test("per-goal continuation limits validate, persist across statuses, and migrate legacy state", async () => {
   const h = harness();
   try {
     await h.command("start configurable goal", h.ctx);
@@ -365,13 +366,13 @@ test("per-task continuation limits validate, persist across statuses, and migrat
     assert.equal(h.entries.at(-1).data.continuations, 0);
     await h.command("limit default", h.ctx);
     assert.equal(h.entries.at(-1).data.continuationLimit, 40);
-    await h.tool("task_update").execute("id", { action: "blocked", note: "waiting" }, undefined, undefined, h.ctx);
+    await h.tool("goal_update").execute("id", { action: "blocked", note: "waiting" }, undefined, undefined, h.ctx);
     await h.command("limit 0", h.ctx);
     assert.equal(h.entries.at(-1).data.continuationLimit, 0);
     await h.command("status", h.ctx);
     assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 0/0"));
 
-    h.setBranch([{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "old state", progress: "", status: "active", continuations: 123456 } }]);
+    h.setBranch([{ type: "custom", customType: "pi-ad-goal", data: { version: 1, goal: "old state", progress: "", status: "active", continuations: 123456 } }]);
     await h.command("status", h.ctx);
     assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 123456/40"));
     await h.command("limit off", h.ctx);
@@ -387,13 +388,13 @@ test("per-task continuation limits validate, persist across statuses, and migrat
 test("continuation limits stop at zero and saturate safely at the counter boundary", async () => {
   const h = harness();
   try {
-    h.setBranch([{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "zero limit", progress: "", status: "active", continuations: 0, continuationLimit: 0 } }]);
+    h.setBranch([{ type: "custom", customType: "pi-ad-goal", data: { version: 1, goal: "zero limit", progress: "", status: "active", continuations: 0, continuationLimit: 0 } }]);
     assert.equal(await h.handlers.get("agent_before_settle")!({ outcome: "completed", entries: [], context: {} }, h.ctx), undefined);
     await h.command("status", h.ctx);
     assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 0/0"));
     assert.equal(h.entries.length, 0);
 
-    h.setBranch([{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "unlimited boundary", progress: "", status: "active", continuations: Number.MAX_SAFE_INTEGER, continuationLimit: null } }]);
+    h.setBranch([{ type: "custom", customType: "pi-ad-goal", data: { version: 1, goal: "unlimited boundary", progress: "", status: "active", continuations: Number.MAX_SAFE_INTEGER, continuationLimit: null } }]);
     const settle = h.handlers.get("agent_before_settle")!;
     assert.equal((await settle({ outcome: "completed", entries: [], context: {} }, h.ctx)).continue, true);
     await h.command("status", h.ctx);
@@ -404,25 +405,25 @@ test("continuation limits stop at zero and saturate safely at the counter bounda
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("restores task state and tool exposure from only the active branch", async () => {
+test("restores goal state and tool exposure from only the active branch", async () => {
   const h = harness();
   try {
-    h.entries.push({ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "branch goal", progress: "", status: "active", continuations: 2 } });
+    h.entries.push({ type: "custom", customType: "pi-ad-goal", data: { version: 1, goal: "branch goal", progress: "", status: "active", continuations: 2 } });
     h.handlers.get("session_start")!({}, h.ctx);
-    assert.equal(h.activeTools.has("task_update"), true);
-    const otherBranch = [{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "other", progress: "", status: "done", continuations: 0 } }];
+    assert.equal(h.activeTools.has("goal_update"), true);
+    const otherBranch = [{ type: "custom", customType: "pi-ad-goal", data: { version: 1, goal: "other", progress: "", status: "done", continuations: 0 } }];
     h.setBranch(otherBranch);
     h.handlers.get("session_tree")!({}, h.ctx);
-    assert.equal(h.activeTools.has("task_update"), false);
+    assert.equal(h.activeTools.has("goal_update"), false);
     h.setBranch(h.entries);
     h.handlers.get("session_start")!({}, h.ctx);
-    assert.equal(h.activeTools.has("task_update"), true);
+    assert.equal(h.activeTools.has("goal_update"), true);
     assert.equal(h.entries[0].data.goal, "branch goal");
-    h.setBranch([{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "numeric limit", progress: "", status: "active", continuations: 4, continuationLimit: 17 } }]);
+    h.setBranch([{ type: "custom", customType: "pi-ad-goal", data: { version: 1, goal: "numeric limit", progress: "", status: "active", continuations: 4, continuationLimit: 17 } }]);
     h.handlers.get("session_tree")!({}, h.ctx);
     await h.command("status", h.ctx);
     assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 4/17"));
-    h.setBranch([{ type: "custom", customType: "pi-ad-hooks-task", data: { version: 1, goal: "unlimited", progress: "", status: "active", continuations: 5, continuationLimit: null } }]);
+    h.setBranch([{ type: "custom", customType: "pi-ad-goal", data: { version: 1, goal: "unlimited", progress: "", status: "active", continuations: 5, continuationLimit: null } }]);
     h.handlers.get("session_tree")!({}, h.ctx);
     await h.command("status", h.ctx);
     assert.ok(h.notifications.at(-1)!.includes("Automatic continuations: 5/unlimited"));
@@ -441,7 +442,7 @@ function fakeSubagents(h: ReturnType<typeof harness>, initial: number) {
   return (value: number) => { running = value; };
 }
 
-test("task waits for running background subagents instead of spending a continuation", async () => {
+test("goal waits for running background subagents instead of spending a continuation", async () => {
   const h = harness();
   try {
     const setRunning = fakeSubagents(h, 2);
@@ -453,7 +454,7 @@ test("task waits for running background subagents instead of spending a continua
     await h.command("status", h.ctx);
     assert.match(h.notifications.at(-1)!, /Waiting for 2 background subagents/);
 
-    // pi-subagents wakes the parent itself: a run starts before the grace period ends, so the task does nothing.
+    // pi-subagents wakes the parent itself: a run starts before the grace period ends, so the goal does nothing.
     setRunning(0);
     h.emit("subagent:async-complete", { runId: "r1" });
     h.handlers.get("agent_start")!({}, h.ctx);
@@ -465,7 +466,7 @@ test("task waits for running background subagents instead of spending a continua
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("task starts the next step itself when a subagent completion produced no run", async () => {
+test("goal starts the next step itself when a subagent completion produced no run", async () => {
   const h = harness();
   try {
     const setRunning = fakeSubagents(h, 1);
@@ -475,8 +476,8 @@ test("task starts the next step itself when a subagent completion produced no ru
     h.emit("subagent:async-complete", { runId: "r1" });
     await sleep(80);
     assert.equal(h.customSent.length, 1);
-    assert.equal(h.customSent[0].message.customType, "pi-ad-hooks-task-continuation");
-    assert.match(h.customSent[0].message.content, /Continue the active task/);
+    assert.equal(h.customSent[0].message.customType, "pi-ad-goal-continuation");
+    assert.match(h.customSent[0].message.content, /Continue working toward the active goal/);
     assert.equal(h.customSent[0].options.triggerTurn, true);
     assert.equal(h.entries.at(-1).data.continuations, 1);
     await h.command("status", h.ctx);
@@ -504,7 +505,7 @@ test("missed-wake fallback stays quiet while other subagents still run or Pi is 
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("task cannot be marked done by the model while background subagents run", async () => {
+test("goal cannot be marked done by the model while background subagents run", async () => {
   const h = harness();
   try {
     const setRunning = fakeSubagents(h, 1);
@@ -521,7 +522,7 @@ test("task cannot be marked done by the model while background subagents run", a
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
-test("without pi-subagents the task continues and allows done after one short timeout", async () => {
+test("without pi-subagents the goal continues and allows done after one short timeout", async () => {
   const h = harness();
   try {
     await h.command("start solo goal", h.ctx);
@@ -556,7 +557,7 @@ test("stock reviewer merge verdicts count, including verdicts only in the full-o
     h.entries.push(truncated);
     const settle = h.handlers.get("agent_before_settle")!;
     assert.equal((await settle(SETTLED, h.ctx)).continue, true);
-    const recorded = h.entries.filter(entry => entry.customType === "pi-ad-task-review-verdict");
+    const recorded = h.entries.filter(entry => entry.customType === "pi-ad-goal-review-verdict");
     assert.deepEqual(recorded.map(entry => entry.data), [{ path: full, rejected: true }], "a file verdict is recorded once");
     rmSync(full);
     assert.equal(countReviewRejections(h.entries), 2, "recorded verdicts survive file cleanup");

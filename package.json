@@ -9,11 +9,11 @@
   "pi": {
     "extensions": [
       "./pi-ad-hooks/index.ts",
-      "./pi-ad-task/index.ts",
+      "./pi-ad-goal/index.ts",
       "./node_modules/pi-subagents/bundle/index.js"
     ],
     "skills": [
-      "./pi-ad-task/skills/*",
+      "./pi-ad-goal/skills/*",
       "./node_modules/pi-subagents/skills"
     ],
     "prompts": [
@@ -21,8 +21,8 @@
     ]
   },
   "scripts": {
-    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck pi-ad-hooks/index.ts pi-ad-hooks/config.ts pi-ad-hooks/prompt-queue.ts pi-ad-hooks/script-runner.ts pi-ad-task/index.ts pi-ad-task/task.ts pi-ad-task/review-limit.ts pi-ad-task/subagents.ts pi-ad-task/task.test.mts pi-ad-hooks/config.test.mts pi-ad-hooks/prompt-queue.test.mts pi-ad-hooks/script-runner.test.mts pi-ad-hooks/index.test.mts",
-    "test": "node --test pi-ad-hooks/config.test.mts pi-ad-hooks/prompt-queue.test.mts pi-ad-hooks/script-runner.test.mts pi-ad-task/task.test.mts pi-ad-hooks/index.test.mts package-manifest.test.mjs",
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions --skipLibCheck pi-ad-hooks/index.ts pi-ad-hooks/config.ts pi-ad-hooks/prompt-queue.ts pi-ad-hooks/script-runner.ts pi-ad-goal/index.ts pi-ad-goal/goal.ts pi-ad-goal/review-limit.ts pi-ad-goal/subagents.ts pi-ad-goal/goal.test.mts pi-ad-hooks/config.test.mts pi-ad-hooks/prompt-queue.test.mts pi-ad-hooks/script-runner.test.mts pi-ad-hooks/index.test.mts",
+    "test": "node --test pi-ad-hooks/config.test.mts pi-ad-hooks/prompt-queue.test.mts pi-ad-hooks/script-runner.test.mts pi-ad-goal/goal.test.mts pi-ad-hooks/index.test.mts package-manifest.test.mjs",
     "docs:check": "python3 .agents/skills/repo-docs/scripts/check_docs.py ."
   },
   "dependencies": {

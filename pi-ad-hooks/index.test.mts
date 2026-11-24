@@ -19,8 +19,8 @@ test("extension registers precisely every public event once", () => {
     try { extension(api as never); } finally { console.error = oldError; }
     assert.deepEqual(registered, [...EVENTS]);
     assert.equal(new Set(registered).size, 41);
-    assert.equal(commands, 0, "hooks do not register the task command");
-    assert.equal(tools, 0, "hooks do not register task tools");
+    assert.equal(commands, 0, "hooks do not register the goal command");
+    assert.equal(tools, 0, "hooks do not register goal tools");
   } finally { if (oldDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = oldDir; rmSync(dir, { recursive: true, force: true }); }
 });
 
